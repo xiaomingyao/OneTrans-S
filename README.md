@@ -27,17 +27,17 @@ git -C GPU_Reference rev-parse HEAD        # 8febd7e…；status --porcelain 为
 
 判据：运行首行必须打印 `{'torch': '2.7.1+cpu', 'torch_npu': '2.7.1.post4', 'soc': 'Ascend950DT_9582'}`，对不上就不能与本仓数字对比；950 上 AMP 只放行 bf16。
 
-## 2. 从 GPU 迁移到 NPU：关键修改
+## 2. 从 GPU 迁移到 NPU：几点关键修改说明
 
 改动集中在「接线层」，模型定义与数据管道**零改动**：触碰上游 2 个文件 **147 行**（`main_pytorch.py` +9/−0、`scripts/run_taac2026_sample.py` +104/−34，占 1,233 行活跃 Python 的 11.9%），另新增兼容层 `npu_compat.py` 160 行；`models/*`、`utils/*` **0 行**。
 
-| # | 关键修改 | 为什么这么改 |
+| # | 修改点 | 修改说明 |
 |---|---|---|
-| 1 | 平台差异收敛到 `npu_compat.py` 一个文件（设备初始化 / AMP 能力门 / no-op scaler / autocast / 分布式 / 收尾） | 其余代码只调这层接口，`models`、`utils` 才能保持 0 行；换机型只改一个文件 |
-| 2 | 新增 `ONETRANS_ATTN_MASK=float\|bool` 开关，默认 float（与上游逐字等价） | 950 上 float 加性 mask 使 SDPA 退回 Cast+Muls+BatchMatMul+Softmax 手工路径（45 kernel / 139 µs）；bool mask 才落 `FlashAttentionScoreV4`（6 kernel / 36.9 µs） |
-| 3 | `should_enable_amp()` 在 NPU 只放行 bf16，GradScaler 用 no-op | 平台 autocast 默认 dtype 是 fp16 而非 bf16；且本模型 bf16 实测慢 27.5%，默认关闭 |
-| 4 | HCCL + `device_ids=[local_rank]` + `broadcast_buffers=False` + `find_unused_parameters=True`；训练集按 rank 切分、验证只在 rank0 跑全量，**循环内不做跨卡归约** | epoch 末 `all_gather` + `.cpu()` 实测会卡在 D2H；AUC/acc 本来不需要集合通信 |
-| 5 | 计时加 `torch.npu.synchronize()`；收尾 `shutdown()` + `os._exit(0)` | 不同步的计时偏小；平台 teardown 抖动会被误报成任务失败 |
+| 1 | 新增兼容层 `npu_compat.py` | 把设备初始化、AMP 能力门、no-op scaler、autocast 上下文、HCCL 分布式、收尾统一收进一个文件（160 行），业务代码只调这层接口；因此 `models`、`utils` 保持 0 行，换机型只改这一处 |
+| 2 | attention mask 形态开关 | `main_pytorch.py` 新增 `ONETRANS_ATTN_MASK=float\|bool`（+9 行），默认 float 与上游逐字等价。950 上 float 加性 mask 会让 SDPA 退回 Cast+Muls+BatchMatMul+Softmax 手工路径（45 kernel / 139 µs），bool mask 才落 `FlashAttentionScoreV4`（6 kernel / 36.9 µs，3.77×） |
+| 3 | AMP 能力门 | `should_enable_amp()` 在 NPU 只放行 bf16（平台 autocast 默认 dtype 是 fp16），GradScaler 改为 no-op；本模型 bf16 实测更慢，故默认关闭，只有显式 `--amp --amp-dtype bf16` 才开 |
+| 4 | 多卡装配 | HCCL + `device_ids=[local_rank]` + `broadcast_buffers=False` + `find_unused_parameters=True`（最深金字塔块有 16 个参数本步不参与前向）；训练集按 rank 切分、验证只在 rank0 跑全量，**循环内不做跨卡归约**——实测 epoch 末 `all_gather` + `.cpu()` 会卡在 D2H |
+| 5 | 计时与收尾 | 计时前加 `torch.npu.synchronize()`（否则步时偏小）；收尾 `shutdown()` + `os._exit(0)`，避免平台 teardown 抖动被误报成任务失败 |
 
 细节（每项的「改前 vs 改后 + 判据」）：
 
