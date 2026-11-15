@@ -1,0 +1,12 @@
+# OneTrans_NPU 冒烟（复跑于最终代码：npu_compat + DDP 装配定稿后）
+# env: Ascend950DT_9582 / CANN9.1.0 / torch2.7.1+cpu / torch_npu2.7.1.post4
+
+[env] {'device_type': 'npu', 'torch': '2.7.1+cpu', 'torch_npu': '2.7.1.post4', 'soc': 'Ascend950DT_9582'}
+[model] params=6.00M  blocks=1+4  seq_len=64  ns_len=4
+/opt/buildtools/torch_v2_pt2.7.1/lib/python3.11/site-packages/torch/autograd/__init__.py:221: UserWarning: Cannot create tensor with interal format while allow_internel_format=False, tensor will be created with base format. (Triggered internally at ../torch_npu/csrc/aten/common/TensorFactories.cpp:340.)
+  torch.ones_like(out, memory_format=torch.preserve_format)
+[step 0] loss=1.610520 grad_norm=0.9789 614.3 ms
+[step 1] loss=1.199051 grad_norm=1.1797 76.9 ms
+[step 2] loss=0.794862 grad_norm=1.1984 77.3 ms
+[check] loss_finite=True param_delta=3.008e-03 loss_drop=0.815657
+SMOKE PASS

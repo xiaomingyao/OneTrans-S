@@ -1,0 +1,68 @@
+# OneTrans_NPU 多卡扩展性（真数据集 TAAC2026/data_sample_1000，1000 行；每 rank 本地 batch 64；8 epoch）
+# env: 8×Ascend950DT die / CANN9.1.0 / torch2.7.1+cpu / torch_npu2.7.1.post4 / bf16 AMP / HF_ENDPOINT=hf-mirror
+# 采集: 2026-11-14
+
+===== world_size=1 =====
+[env] {'device_type': 'npu', 'torch': '2.7.1+cpu', 'torch_npu': '2.7.1.post4', 'soc': 'Ascend950DT_9582'} dist=world_size=1 rank=0 local_rank=0
+[run] metadata
+[run] device=npu samples=1000 train=800 val=200
+[run] non_seq=(1000, 183) seq=(1000, 32, 45) classes=2
+[run] amp=True amp_dtype=bf16 grad_scaler=False device_type=npu mask_type=paper_causal pyramid_layers=3 pyramid_align=32 sep_token=True activation_checkpoint=False world_size=1 per_rank_batch=64
+[perf] epoch=01 wall=1.560s steps=13 step_ms=120.0 global_samples_per_s=533.3 world_size=1
+[perf] epoch=02 wall=1.005s steps=13 step_ms=77.3 global_samples_per_s=828.2 world_size=1
+[perf] epoch=03 wall=1.011s steps=13 step_ms=77.8 global_samples_per_s=822.9 world_size=1
+[perf] epoch=04 wall=1.024s steps=13 step_ms=78.8 global_samples_per_s=812.3 world_size=1
+[perf] epoch=05 wall=1.018s steps=13 step_ms=78.3 global_samples_per_s=817.1 world_size=1
+[perf] epoch=06 wall=1.005s steps=13 step_ms=77.3 global_samples_per_s=827.8 world_size=1
+[perf] epoch=07 wall=0.979s steps=13 step_ms=75.3 global_samples_per_s=850.0 world_size=1
+[perf] epoch=08 wall=0.981s steps=13 step_ms=75.4 global_samples_per_s=848.4 world_size=1
+[run] metadata saved to /tmp/s1r/run_metadata.json
+[perf] steady_epoch_wall_s=1.003 n=7 world_size=1
+===== world_size=2 =====
+[env] {'device_type': 'npu', 'torch': '2.7.1+cpu', 'torch_npu': '2.7.1.post4', 'soc': 'Ascend950DT_9582'} dist=world_size=2 rank=0 local_rank=0
+[run] metadata
+[run] device=npu:0 samples=1000 train=400 val=200
+[run] non_seq=(1000, 183) seq=(1000, 32, 45) classes=2
+[run] amp=True amp_dtype=bf16 grad_scaler=False device_type=npu mask_type=paper_causal pyramid_layers=3 pyramid_align=32 sep_token=True activation_checkpoint=False world_size=2 per_rank_batch=64
+[perf] epoch=01 wall=1.125s steps=7 step_ms=160.8 global_samples_per_s=796.2 world_size=2
+[perf] epoch=02 wall=0.691s steps=7 step_ms=98.7 global_samples_per_s=1297.0 world_size=2
+[perf] epoch=03 wall=0.689s steps=7 step_ms=98.5 global_samples_per_s=1299.8 world_size=2
+[perf] epoch=04 wall=0.681s steps=7 step_ms=97.3 global_samples_per_s=1314.9 world_size=2
+[perf] epoch=05 wall=0.683s steps=7 step_ms=97.6 global_samples_per_s=1311.6 world_size=2
+[perf] epoch=06 wall=0.689s steps=7 step_ms=98.5 global_samples_per_s=1299.5 world_size=2
+[perf] epoch=07 wall=0.690s steps=7 step_ms=98.5 global_samples_per_s=1299.2 world_size=2
+[perf] epoch=08 wall=0.687s steps=7 step_ms=98.2 global_samples_per_s=1303.5 world_size=2
+[run] metadata saved to /tmp/s2r/run_metadata.json
+[perf] steady_epoch_wall_s=0.687 n=7 world_size=2
+===== world_size=4 =====
+[env] {'device_type': 'npu', 'torch': '2.7.1+cpu', 'torch_npu': '2.7.1.post4', 'soc': 'Ascend950DT_9582'} dist=world_size=4 rank=0 local_rank=0
+[run] metadata
+[run] device=npu:0 samples=1000 train=200 val=200
+[run] non_seq=(1000, 183) seq=(1000, 32, 45) classes=2
+[run] amp=True amp_dtype=bf16 grad_scaler=False device_type=npu mask_type=paper_causal pyramid_layers=3 pyramid_align=32 sep_token=True activation_checkpoint=False world_size=4 per_rank_batch=64
+[perf] epoch=01 wall=0.898s steps=4 step_ms=224.5 global_samples_per_s=1140.3 world_size=4
+[perf] epoch=02 wall=0.435s steps=4 step_ms=108.7 global_samples_per_s=2356.1 world_size=4
+[perf] epoch=03 wall=0.435s steps=4 step_ms=108.8 global_samples_per_s=2353.9 world_size=4
+[perf] epoch=04 wall=0.433s steps=4 step_ms=108.2 global_samples_per_s=2366.0 world_size=4
+[perf] epoch=05 wall=0.437s steps=4 step_ms=109.3 global_samples_per_s=2342.9 world_size=4
+[perf] epoch=06 wall=0.440s steps=4 step_ms=109.9 global_samples_per_s=2329.6 world_size=4
+[perf] epoch=07 wall=0.441s steps=4 step_ms=110.3 global_samples_per_s=2321.7 world_size=4
+[perf] epoch=08 wall=0.432s steps=4 step_ms=108.1 global_samples_per_s=2367.8 world_size=4
+[run] metadata saved to /tmp/s4r/run_metadata.json
+[perf] steady_epoch_wall_s=0.436 n=7 world_size=4
+===== world_size=8 =====
+[env] {'device_type': 'npu', 'torch': '2.7.1+cpu', 'torch_npu': '2.7.1.post4', 'soc': 'Ascend950DT_9582'} dist=world_size=8 rank=0 local_rank=0
+[run] metadata
+[run] device=npu:0 samples=1000 train=100 val=200
+[run] non_seq=(1000, 183) seq=(1000, 32, 45) classes=2
+[run] amp=True amp_dtype=bf16 grad_scaler=False device_type=npu mask_type=paper_causal pyramid_layers=3 pyramid_align=32 sep_token=True activation_checkpoint=False world_size=8 per_rank_batch=64
+[perf] epoch=01 wall=0.851s steps=2 step_ms=425.5 global_samples_per_s=1203.4 world_size=8
+[perf] epoch=02 wall=0.279s steps=2 step_ms=139.7 global_samples_per_s=3665.1 world_size=8
+[perf] epoch=03 wall=0.280s steps=2 step_ms=139.9 global_samples_per_s=3661.0 world_size=8
+[perf] epoch=04 wall=0.282s steps=2 step_ms=140.8 global_samples_per_s=3636.1 world_size=8
+[perf] epoch=05 wall=0.281s steps=2 step_ms=140.3 global_samples_per_s=3649.8 world_size=8
+[perf] epoch=06 wall=0.279s steps=2 step_ms=139.7 global_samples_per_s=3665.8 world_size=8
+[perf] epoch=07 wall=0.272s steps=2 step_ms=135.8 global_samples_per_s=3769.8 world_size=8
+[perf] epoch=08 wall=0.273s steps=2 step_ms=136.3 global_samples_per_s=3755.6 world_size=8
+[run] metadata saved to /tmp/s8r/run_metadata.json
+[perf] steady_epoch_wall_s=0.278 n=7 world_size=8

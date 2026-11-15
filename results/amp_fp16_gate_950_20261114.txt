@@ -1,0 +1,24 @@
+# AMP 放行规则实测：--amp --amp-dtype fp16 在 NPU 上应被禁用（回落 fp32）且仍能训练
+
+[env] {'device_type': 'npu', 'torch': '2.7.1+cpu', 'torch_npu': '2.7.1.post4', 'soc': 'Ascend950DT_9582'} dist=world_size=1 rank=0 local_rank=0
+[data] synthetic rows=2048 seq_len=32 non_seq_dim=64 seq_feat_dim=32
+[run] metadata
+{
+  "source": "synthetic",
+  "rows": 2048,
+  "seq_len": 32,
+  "non_seq_dim": 64,
+  "seq_feature_dim": 32,
+  "num_classes": 5
+}
+[run] device=npu samples=2048 train=1639 val=409
+[run] non_seq=(2048, 64) seq=(2048, 32, 32) classes=5
+[run] amp=False amp_dtype=fp16 grad_scaler=False device_type=npu mask_type=paper_causal pyramid_layers=3 pyramid_align=32 sep_token=True activation_checkpoint=False world_size=1 per_rank_batch=32
+/opt/buildtools/torch_v2_pt2.7.1/lib/python3.11/site-packages/torch/autograd/__init__.py:221: UserWarning: Cannot create tensor with interal format while allow_internel_format=False, tensor will be created with base format. (Triggered internally at ../torch_npu/csrc/aten/common/TensorFactories.cpp:340.)
+  torch.ones_like(out, memory_format=torch.preserve_format)
+[epoch 01] train_loss=1.0544 train_auc=0.8775 train_acc=0.6156 val_loss=0.6296 val_auc=0.9562 val_acc=0.7628
+[perf] epoch=01 wall=3.625s steps=52 step_ms=69.7 global_samples_per_s=459.1 world_size=1
+[epoch 02] train_loss=0.4727 train_auc=0.9713 train_acc=0.8225 val_loss=0.5194 val_auc=0.9667 val_acc=0.8020
+[perf] epoch=02 wall=3.103s steps=52 step_ms=59.7 global_samples_per_s=536.2 world_size=1
+[run] metadata saved to /tmp/ot_fp16/run_metadata.json
+[perf] steady_epoch_wall_s=3.103 n=1 world_size=1

@@ -1,0 +1,5 @@
+kernel 明细（msprof, 3 个 block 的 attention 段）
+float_mask: kernels=45 total=140.3us  (InplaceCopy 36.2 / Muls 24.7 / Matmul 19.0 / SWhere 12.7 / Softmax 12.7 / Add 10.1)  FA=0
+bool_mask : kernels=6  total=38.3us   (FlashAttentionScoreV4 31.0 / LogicalNot 7.2)  FA=3
+none      : kernels=3  total=28.0us   (FlashAttentionScoreV4 28.0)  FA=3
+=> attention 段 140.3us -> 38.3us = 3.66x；kernel 数 45 -> 6

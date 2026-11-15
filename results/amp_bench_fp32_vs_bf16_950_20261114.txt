@@ -1,0 +1,22 @@
+# AMP A/B：同进程交替跑 fp32 与 bf16 autocast（3 轮，每轮 10 步，取中位；前 2 步预热剔除）
+# model: OneTrans 6.0M 参数 / batch 64 / seq_len 32
+# env: Ascend950DT_9582 / CANN9.1.0 / torch2.7.1+cpu / torch_npu2.7.1.post4
+
+[env] {'device_type': 'npu', 'torch': '2.7.1+cpu', 'torch_npu': '2.7.1.post4', 'soc': 'Ascend950DT_9582'} batch=64 rounds=3 steps=10
+/opt/buildtools/torch_v2_pt2.7.1/lib/python3.11/site-packages/torch/autograd/__init__.py:221: UserWarning: Cannot create tensor with interal format while allow_internel_format=False, tensor will be created with base format. (Triggered internally at ../torch_npu/csrc/aten/common/TensorFactories.cpp:340.)
+  torch.ones_like(out, memory_format=torch.preserve_format)
+[fp32] round=0 median_step_ms=54.2 peak_hbm_delta_mib=109
+[bf16] round=0 median_step_ms=69.0 peak_hbm_delta_mib=99
+[fp32] round=1 median_step_ms=54.3 peak_hbm_delta_mib=109
+[bf16] round=1 median_step_ms=69.3 peak_hbm_delta_mib=99
+[fp32] round=2 median_step_ms=55.3 peak_hbm_delta_mib=109
+[bf16] round=2 median_step_ms=70.3 peak_hbm_delta_mib=99
+
+| 档位 | 步时中位(ms) | 峰值 HBM 增量(MiB) |
+|---|---:|---:|
+| fp32 | 54.3 | 109 |
+| bf16 | 69.3 | 99 |
+
+[verdict] bf16/fp32 步时比 = 1.275 (> 1 表示 bf16 更慢)
+AMP-BENCH DONE
+DONE

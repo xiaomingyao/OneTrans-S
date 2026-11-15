@@ -1,0 +1,299 @@
+diff -ru '--exclude=.git' '--exclude=__pycache__' '--exclude=*.bak' '--exclude=.idea' '--exclude=.gitignore' GPU_Reference/main_pytorch.py OneTrans_NPU/main_pytorch.py
+--- GPU_Reference/main_pytorch.py	2026-11-14 12:22:52.038301208 +0800
++++ OneTrans_NPU/main_pytorch.py	2026-11-14 12:26:15.784522579 +0800
+@@ -1,7 +1,14 @@
++import os
++
+ import torch
+ from torch import nn
+ from torch.utils.checkpoint import checkpoint
+ 
++# [NPU] 可选：把"0 / -inf"型加性 mask 换成 bool mask。
++# 950 实测（见 docs/MIGRATION_GUIDE）：float 加性 mask 会让 SDPA 退回 Cast+Muls+BatchMatMul+Softmax
++# 手工路径；bool mask 才落 FlashAttentionScoreV4。默认 float，保持与参考实现逐字等价。
++_MASK_DTYPE = os.environ.get("ONETRANS_ATTN_MASK", "float").lower()
++
+ VALID_MASK_TYPES = {"paper_causal", "origin", "hard_mask", "bimask_soft", "bimask_hard"}
+ 
+ 
+@@ -68,6 +75,8 @@
+             col_idx = torch.arange(key_len, device=device).unsqueeze(0)
+             q_abs = row_idx + (key_len - query_len)
+             allowed = col_idx <= q_abs
++            if _MASK_DTYPE == "bool":
++                return allowed
+             mask = torch.zeros(query_len, key_len, device=device, dtype=dtype)
+             return mask.masked_fill(~allowed, torch.finfo(dtype).min)
+ 
+@@ -77,6 +86,8 @@
+         if self.mask_type == "origin":
+             return origin_allowed.to(dtype=dtype) + 1e-9
+         if self.mask_type == "hard_mask":
++            if _MASK_DTYPE == "bool":
++                return origin_allowed
+             mask = torch.zeros(query_len, key_len, device=device, dtype=dtype)
+             return mask.masked_fill(~origin_allowed, torch.finfo(dtype).min)
+ 
+Only in OneTrans_NPU: npu_compat.py
+diff -ru '--exclude=.git' '--exclude=__pycache__' '--exclude=*.bak' '--exclude=.idea' '--exclude=.gitignore' GPU_Reference/scripts/run_taac2026_sample.py OneTrans_NPU/scripts/run_taac2026_sample.py
+--- GPU_Reference/scripts/run_taac2026_sample.py	2026-11-14 12:22:52.039301228 +0800
++++ OneTrans_NPU/scripts/run_taac2026_sample.py	2026-11-14 15:38:45.766406481 +0800
+@@ -4,7 +4,9 @@
+ import contextlib
+ import json
+ import math
++import os
+ import sys
++import time
+ from datetime import datetime
+ from pathlib import Path
+ from typing import Any
+@@ -21,12 +23,14 @@
+ from utils.common import json_ready_args, set_seed, split_indices, take_rows
+ from utils.metrics import accuracy_from_logits, multiclass_auc_from_logits
+ from utils.taac_data import build_tensors, load_train_split
++import npu_compat
+ 
+ MASK_TYPE_CHOICES = ("paper_causal", "origin", "hard_mask", "bimask_soft", "bimask_hard")
+ 
+ 
+ def parse_device_type(device: str) -> str:
+-    return torch.device(device).type
++    """[NPU] 保留原签名；实际初始化（含 torch_npu 导入/set_device）在 npu_compat。"""
++    return npu_compat.init_device(device)
+ 
+ 
+ def resolve_amp_dtype(amp_dtype: str) -> torch.dtype:
+@@ -38,22 +42,17 @@
+ 
+ 
+ def should_enable_amp(device_type: str, amp: bool, amp_dtype: str) -> bool:
+-    if not amp:
+-        return False
+-    if device_type != "cuda":
+-        return False
+-    if amp_dtype == "bf16" and not torch.cuda.is_bf16_supported():
+-        return False
+-    return True
+-
+-
+-def build_scaler(device_type: str, use_amp: bool, amp_dtype: torch.dtype) -> torch.amp.GradScaler:
+-    scaler_enabled = use_amp and device_type == "cuda" and amp_dtype == torch.float16
+-    return torch.amp.GradScaler(device=device_type, enabled=scaler_enabled)
++    """[NPU] CUDA/NPU 各自可用组合由兼容层判定（NPU 仅放行 bf16）。"""
++    return npu_compat.should_enable_amp(device_type, amp, amp_dtype)
+ 
+ 
+-def autocast_context(device_type: str, amp_dtype: torch.dtype, use_amp: bool) -> contextlib.AbstractContextManager[Any]:
+-    return torch.autocast(device_type=device_type, dtype=amp_dtype, enabled=use_amp)
++def build_scaler(device_type: str, use_amp: bool, amp_dtype: torch.dtype):
++    """[NPU] NPU 返回 no-op scaler，CUDA fp16 仍是 GradScaler。"""
++    return npu_compat.build_scaler(device_type, use_amp, amp_dtype)
++
++
++def autocast_context(device_type: str, amp_dtype: torch.dtype, use_amp: bool):
++    return npu_compat.autocast_context(device_type, amp_dtype, use_amp)
+ 
+ 
+ def normalize_mask_type(mask_type: str) -> str:
+@@ -125,6 +124,12 @@
+         help="Resume training from a checkpoint filename under output-dir, or from an explicit checkpoint path.",
+     )
+     parser.add_argument("--save-checkpoint", action="store_true")
++    parser.add_argument(
++        "--ddp-strict",
++        action="store_true",
++        help="[NPU] 关掉 DDP 的 find_unused_parameters。该模型在最深金字塔块里有 16 个参数不参与前向"
++             "（token 组索引超出该层实际组数），默认必须开启；确认自己的配置每步都用满全部参数时才可关闭。",
++    )
+     return parser.parse_args()
+ 
+ 
+@@ -175,9 +180,12 @@
+         epoch_logits.append(logits.detach().cpu())
+         epoch_labels.append(labels.detach().cpu())
+ 
+-    if total_items == 0:
++    if not epoch_logits:
+         return 0.0, 0.0, float("nan")
+ 
++    # [NPU] 多卡口径与生产 zeus-onetrans 一致：**不在训练循环里做跨 rank 归约**。
++    # 这里返回的是本 rank 本地口径；训练集按 rank 切分，验证集在 rank0 上跑全量，
++    # 因而不变量化指标不需要任何集合通信（实测在 epoch 末加 all_gather 会卡在 D2H 拷贝）。
+     auc = multiclass_auc_from_logits(torch.cat(epoch_logits, dim=0), torch.cat(epoch_labels, dim=0))
+     return total_loss / total_items, total_acc / total_items, auc
+ 
+@@ -190,8 +198,17 @@
+     num_workers: int,
+     val_ratio: float,
+     seed: int,
++    world_size: int = 1,
++    rank: int = 0,
+ ) -> tuple[DataLoader, DataLoader]:
+     train_idx, val_idx = split_indices(labels.size(0), val_ratio, seed)
++    if world_size > 1:
++        # 训练集：每个 rank 取不相交子集（stride 切分，不填充、不重复），全局 batch 语义不变。
++        train_idx = train_idx[rank::world_size]
++        # 验证集：只在 rank0 上全量评估（同生产 zeus-onetrans），其余 rank 给空集不参与，
++        # 这样 AUC 是全集口径，且训练循环里不需要任何跨卡归约。
++        if rank != 0:
++            val_idx = val_idx[:0]
+     train_dataset = TensorDataset(non_seq_x[train_idx], seq_x[train_idx], labels[train_idx])
+     val_dataset = TensorDataset(non_seq_x[val_idx], seq_x[val_idx], labels[val_idx])
+     train_loader = DataLoader(
+@@ -287,10 +304,20 @@
+     set_seed(args.seed)
+     args.output_dir.mkdir(parents=True, exist_ok=True)
+     device_type = parse_device_type(args.device)
++
++    # [NPU] torchrun 拉起时（WORLD_SIZE>1）初始化 HCCL；单进程返回 (0,1,0) 且不改变任何行为
++    rank, world_size, local_rank = npu_compat.init_distributed()
++    if world_size > 1:
++        args.device = f"{device_type}:{local_rank}"
++    is_main = rank == 0
++    log = print if is_main else (lambda *a, **k: None)
++    log(f"[env] {npu_compat.describe(device_type)} dist=world_size={world_size} rank={rank} local_rank={local_rank}")
++
+     amp_dtype = resolve_amp_dtype(args.amp_dtype)
+     use_amp = should_enable_amp(device_type=device_type, amp=args.amp, amp_dtype=args.amp_dtype)
+     scaler = build_scaler(device_type=device_type, use_amp=use_amp, amp_dtype=amp_dtype)
+ 
++    # 数据集与参考实现完全一致（HF 数据集 / 本地 parquet），不做合成数据替代
+     dataset = load_train_split(args.dataset_id, args.cache_dir, args.local_parquet)
+     rows = take_rows(dataset, args.max_rows)
+     non_seq_x, seq_x, labels, metadata = build_tensors(rows, args.seq_len)
+@@ -302,21 +329,34 @@
+         num_workers=args.num_workers,
+         val_ratio=args.val_ratio,
+         seed=args.seed,
++        world_size=world_size,
++        rank=rank,
+     )
+     model = build_model(args, non_seq_x, seq_x, labels)
++    if world_size > 1:
++        # [NPU] DDP 只包外壳，模型定义零改动；梯度按 rank 平均 = 全局 batch 的均值梯度。
++        # device_ids=[local_rank] / broadcast_buffers=False / find_unused_parameters=True 与生产
++        # zeus-onetrans 的写法一致（该模型最深金字塔块有 16 个参数不参与前向，必须允许未用参数）。
++        model = nn.parallel.DistributedDataParallel(
++            model,
++            device_ids=[local_rank] if device_type == "npu" else None,
++            find_unused_parameters=not args.ddp_strict,
++            broadcast_buffers=False,
++        )
+     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+     criterion = nn.CrossEntropyLoss()
+     start_epoch = 1
+ 
+-    print("[run] metadata")
+-    print(json.dumps(metadata, indent=2, ensure_ascii=False))
+-    print(f"[run] device={args.device} samples={labels.size(0)} train={len(train_loader.dataset)} val={len(val_loader.dataset)}")
+-    print(f"[run] non_seq={tuple(non_seq_x.shape)} seq={tuple(seq_x.shape)} classes={int(labels.max().item()) + 1}")
+-    print(
++    log("[run] metadata")
++    log(json.dumps(metadata, indent=2, ensure_ascii=False))
++    log(f"[run] device={args.device} samples={labels.size(0)} train={len(train_loader.dataset)} val={len(val_loader.dataset)}")
++    log(f"[run] non_seq={tuple(non_seq_x.shape)} seq={tuple(seq_x.shape)} classes={int(labels.max().item()) + 1}")
++    log(
+         f"[run] amp={use_amp} amp_dtype={args.amp_dtype} "
+         f"grad_scaler={scaler.is_enabled()} device_type={device_type} mask_type={args.mask_type} "
+         f"pyramid_layers={args.num_pyramid_layers} pyramid_align={args.pyramid_align} "
+-        f"sep_token={args.use_sep_token} activation_checkpoint={args.use_checkpoint}"
++        f"sep_token={args.use_sep_token} activation_checkpoint={args.use_checkpoint} "
++        f"world_size={world_size} per_rank_batch={args.batch_size}"
+     )
+ 
+     best_val_auc = float("-inf")
+@@ -329,10 +369,14 @@
+             raise FileNotFoundError(f"Checkpoint not found: {resume_path}")
+         start_epoch, best_val_auc = load_checkpoint_state(resume_path, model, optimizer, scaler, args.device)
+         best_epoch = start_epoch - 1
+-        print(f"[run] resumed from {resume_path}")
+-        print(f"[run] resume_start_epoch={start_epoch} resume_best_val_auc={best_val_auc:.4f}")
++        log(f"[run] resumed from {resume_path}")
++        log(f"[run] resume_start_epoch={start_epoch} resume_best_val_auc={best_val_auc:.4f}")
+ 
++    epoch_walls: list[float] = []
+     for epoch in range(start_epoch, args.epochs + 1):
++        if device_type == "npu":
++            torch.npu.synchronize()   # 只同步本 rank 设备（HCCL barrier 不必要，见 npu_compat 注释）
++        t_epoch = time.perf_counter()
+         train_loss, train_acc, train_auc = run_epoch(
+             model,
+             train_loader,
+@@ -343,27 +387,42 @@
+             scaler=scaler,
+             optimizer=optimizer,
+         )
+-        val_loss, val_acc, val_auc = run_epoch(
+-            model,
+-            val_loader,
+-            criterion,
+-            args.device,
+-            amp_dtype=amp_dtype,
+-            use_amp=use_amp,
+-            scaler=scaler,
+-        )
+-        print(
++        if len(val_loader.dataset) > 0:
++            val_loss, val_acc, val_auc = run_epoch(
++                model,
++                val_loader,
++                criterion,
++                args.device,
++                amp_dtype=amp_dtype,
++                use_amp=use_amp,
++                scaler=scaler,
++            )
++        else:
++            val_loss = val_acc = val_auc = float("nan")   # 非 rank0 不评估
++        if device_type == "npu":
++            torch.npu.synchronize()
++        wall = time.perf_counter() - t_epoch
++        epoch_walls.append(wall)
++        # 全局吞吐 = 每步全局 batch / 每步墙钟（墙钟已含 DDP 梯度同步，各 rank 步时锁定）
++        global_items = args.batch_size * world_size
++        step_s = wall / max(len(train_loader), 1)
++        log(
+             f"[epoch {epoch:02d}] "
+             f"train_loss={train_loss:.4f} train_auc={train_auc:.4f} train_acc={train_acc:.4f} "
+             f"val_loss={val_loss:.4f} val_auc={val_auc:.4f} val_acc={val_acc:.4f}"
+         )
++        log(
++            f"[perf] epoch={epoch:02d} wall={wall:.3f}s steps={len(train_loader)} "
++            f"step_ms={wall / max(len(train_loader), 1) * 1000:.1f} "
++            f"global_samples_per_s={global_items / step_s:.1f} world_size={world_size}"
++        )
+         if not math.isnan(val_auc) and val_auc > best_val_auc:
+             best_val_auc = val_auc
+             best_epoch = epoch
+ 
+     last_completed_epoch = max(start_epoch - 1, args.epochs)
+     checkpoint_state = {
+-        "model": model.state_dict(),
++        "model": (model.module if hasattr(model, "module") else model).state_dict(),
+         "metadata": metadata,
+         "args": args_payload,
+         "optimizer": optimizer.state_dict(),
+@@ -373,7 +432,20 @@
+         "best_epoch": best_epoch,
+     }
+ 
+-    save_run_artifacts(args.output_dir, metadata, args_payload, checkpoint_state, args.save_checkpoint)
++    if is_main:
++        save_run_artifacts(args.output_dir, metadata, args_payload, checkpoint_state, args.save_checkpoint)
++        if epoch_walls:
++            steady = epoch_walls[1:] or epoch_walls
++            log(f"[perf] steady_epoch_wall_s={sum(steady) / len(steady):.3f} n={len(steady)} world_size={world_size}")
++    # [NPU] 收尾：先同步 + 销毁进程组，再强制退出。
++    # 实测（2/4 卡各 1 次）：训练跑完后非 0 号 rank 会在解释器退出阶段收到 SIGSEGV(-11)/SIGBUS(-7)，
++    # torchrun 因此报 ChildFailedError —— 失败发生在 teardown，训练本身已正常完成。
++    # 故此处显式 os._exit(0) 跳过解释器收尾，避免把「平台 teardown 抖动」误报成任务失败。
++    npu_compat.shutdown()
++    if world_size > 1:
++        sys.stdout.flush()
++        sys.stderr.flush()
++        os._exit(0)
+ 
+ 
+ if __name__ == "__main__":
+Only in OneTrans_NPU: tests

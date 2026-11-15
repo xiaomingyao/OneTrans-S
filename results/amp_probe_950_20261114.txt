@@ -1,0 +1,16 @@
+# AMP 生效性探针（autocast 是否真生效 / 默认 dtype / 输出 dtype / no-op scaler / 放行规则）
+# env: Ascend950DT_9582 / CANN9.1.0 / torch2.7.1+cpu / torch_npu2.7.1.post4
+
+[env] {'device_type': 'npu', 'torch': '2.7.1+cpu', 'torch_npu': '2.7.1.post4', 'soc': 'Ascend950DT_9582'}
+[default] torch.get_autocast_dtype('npu') = torch.float16
+[bf16] autocast_enabled=True matmul_out_dtype=torch.bfloat16
+[fp32] matmul_out_dtype=torch.float32
+[default] matmul_out_dtype=torch.float16
+/opt/buildtools/torch_v2_pt2.7.1/lib/python3.11/site-packages/torch/autograd/__init__.py:221: UserWarning: Cannot create tensor with interal format while allow_internel_format=False, tensor will be created with base format. (Triggered internally at ../torch_npu/csrc/aten/common/TensorFactories.cpp:340.)
+  torch.ones_like(out, memory_format=torch.preserve_format)
+[scaler] is_enabled=False state_dict={} shape_ok=True
+[gate] npu/bf16 -> amp=True
+[gate] npu/fp16 -> amp=False
+[gate] cuda/fp16 -> amp=True
+[gate] cpu/bf16 -> amp=False
+AMP-PROBE DONE

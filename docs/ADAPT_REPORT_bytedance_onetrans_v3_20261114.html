@@ -1,0 +1,513 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OneTrans 适配报告 v3：仅硬件相关改动（代码高亮）· 2026-11-14</title>
+<style>
+:root{--ink:#1a1a2e;--sub:#5a6270;--line:#e3e6ea;--brand:#C00000;--bg:#fbfbfc;}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-size:15px;line-height:1.78;
+ font-family:"Microsoft YaHei","Noto Sans CJK SC","PingFang SC",Arial,sans-serif;-webkit-font-smoothing:antialiased;}
+.wrap{max-width:1120px;margin:0 auto;padding:44px 40px 90px;background:#fff;box-shadow:0 1px 24px rgba(0,0,0,.06);}
+h1{font-size:26px;font-weight:700;color:var(--brand);margin:0 0 8px;}
+h2{font-size:20px;font-weight:700;margin:40px 0 14px;padding-bottom:9px;border-bottom:2px solid var(--brand);}
+h3{font-size:16.5px;font-weight:700;margin:26px 0 10px;}
+p{margin:10px 0;}
+code{font-family:"JetBrains Mono",Consolas,Monaco,monospace;font-size:12.8px;background:#f2f4f6;
+ padding:2px 6px;border-radius:4px;color:#b02a37;}
+pre{background:#1e2633;color:#e6edf3;padding:15px 18px;border-radius:7px;overflow-x:auto;font-size:12.8px;line-height:1.6;}
+pre code{background:none;color:inherit;padding:0;}
+pre.hl{background:#272822;color:#f8f8f2;padding:15px 18px;border-radius:7px;overflow-x:auto;
+ font-size:12.8px;line-height:1.62;border-left:3px solid var(--brand);}
+pre.hl .c,.pre.hl .c1{font-style:italic;}
+.tw{overflow-x:auto;max-width:100%;margin:16px 0;}
+table{border-collapse:collapse;width:max-content;min-width:100%;font-size:13.4px;background:#fff;
+ box-shadow:0 1px 4px rgba(0,0,0,.05);}
+th{background:#C00000;color:#fff;font-weight:600;padding:9px 11px;text-align:left;border:1px solid #a30000;white-space:nowrap;}
+td{padding:9px 11px;border:1px solid var(--line);vertical-align:top;}
+tbody tr:nth-child(even){background:#f8fafb;}
+tbody tr:hover{background:#eef4fa;}
+.fig{margin:22px 0 26px;text-align:center;}
+.fig img{max-width:100%;height:auto;border:1px solid var(--line);border-radius:7px;box-shadow:0 2px 10px rgba(0,0,0,.07);}
+@media(max-width:760px){.wrap{padding:22px 16px 60px}h1{font-size:21px}h2{font-size:18px}table{font-size:12px}th,td{padding:7px 8px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>OneTrans 参考实现 → 昇腾 950：硬件相关代码改动报告</h1>
+<p>项目：<code>/root/bytedance-onetrans/</code>　版本：v3（本次仅改呈现：代码块语法高亮）　日期：2026-11-14
+参考实现：<code>https://github.com/WestbrookLong/OneTrans_Pytorch</code>，commit <strong>8febd7e</strong>（零改动）
+迁移实现：<code>OneTrans_NPU/</code>　环境：容器 <code>zeus-950-v2</code>（<code>zeus-950-v2-snap:20261102</code>）、CANN 9.1.0、torch 2.7.1+cpu / torch_npu 2.7.1.post4
+逐行原文：<code>docs/npu_changes.diff</code>（299 行）</p>
+<blockquote>
+<p>v2 相对 v1：① <strong>删除合成数据集入口</strong>，数据路径与 GPU 侧完全一致（HF <code>TAAC2026/data_sample_1000</code> / 本地 parquet）；② <strong>HF 延迟导入回退</strong>（栈已装好，不再需要改数据代码）；③ 调试打印删除；④ 本报告<strong>只列与硬件相关的改动</strong>，非硬件改动一律回退为参考实现。</p>
+</blockquote>
+<hr />
+<h2>1. 结论</h2>
+<div class="tw"><table>
+<thead>
+<tr>
+<th>项</th>
+<th>数字</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>实改文件</td>
+<td><strong>2 个</strong>：<code>main_pytorch.py</code>、<code>scripts/run_taac2026_sample.py</code></td>
+</tr>
+<tr>
+<td>实改行数</td>
+<td><strong>147 行</strong>（+113 / −34）</td>
+</tr>
+<tr>
+<td>未改文件</td>
+<td><code>models/taac_onetrans.py</code>、<code>utils/metrics.py</code>、<code>utils/common.py</code>、<code>utils/taac_data.py</code>（<strong>四个文件逐字一致</strong>）</td>
+</tr>
+<tr>
+<td>数据集</td>
+<td>与 GPU 侧<strong>同一个</strong>：<code>TAAC2026/data_sample_1000</code>（1,000 行 × 120 列），无合成数据替代</td>
+</tr>
+<tr>
+<td>改动性质</td>
+<td>全部是硬件适配：设备初始化、混合精度能力门、HCCL/DDP 装配、attention kernel 落点、设备收尾、设备侧计时</td>
+</tr>
+<tr>
+<td>可回退性</td>
+<td>全部可回退：不传 <code>--device npu</code> / 不设 <code>ONETRANS_ATTN_MASK</code> / <code>WORLD_SIZE=1</code> 即回到参考实现行为</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>一句话</strong>：147 行里没有一行是为了"让数据能读进来"或"让脚本能跑起来"的便利性改动，全部围绕「昇腾这颗芯片上设备怎么建、精度能力有什么、多卡怎么连、mask 落在哪个 kernel、进程怎么退」。</p>
+<hr />
+<h2>2. 硬件相关改动分类</h2>
+<div class="tw"><table>
+<thead>
+<tr>
+<th>编号</th>
+<th>硬件相关点</th>
+<th>文件</th>
+<th style="text-align: right;">行数</th>
+<th>触发条件</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>H1</td>
+<td><strong>设备初始化</strong>：<code>import torch_npu</code> + <code>set_device</code></td>
+<td>脚本 + <code>npu_compat.py</code></td>
+<td style="text-align: right;">5</td>
+<td><code>--device npu</code></td>
+</tr>
+<tr>
+<td>H2</td>
+<td><strong>混合精度能力门</strong>：NPU 只支持 bf16 AMP、无 GradScaler</td>
+<td>脚本 + <code>npu_compat.py</code></td>
+<td style="text-align: right;">16</td>
+<td><code>--amp</code></td>
+</tr>
+<tr>
+<td>H3</td>
+<td><strong>多卡 HCCL/DDP 装配</strong>（含数据切分、rank0 验证、不跨卡归约）</td>
+<td>脚本 + <code>npu_compat.py</code></td>
+<td style="text-align: right;">约 100</td>
+<td><code>WORLD_SIZE&gt;1</code>（torchrun）</td>
+</tr>
+<tr>
+<td>H4</td>
+<td><strong>attention kernel 落点</strong>：加性 float mask 不落 FA，bool 才落 <code>FlashAttentionScoreV4</code></td>
+<td><code>main_pytorch.py</code></td>
+<td style="text-align: right;">9</td>
+<td><code>ONETRANS_ATTN_MASK=bool</code></td>
+</tr>
+<tr>
+<td>H5</td>
+<td><strong>设备收尾</strong>：teardown SIGSEGV/SIGBUS</td>
+<td>脚本 + <code>npu_compat.py</code></td>
+<td style="text-align: right;">8</td>
+<td>多卡</td>
+</tr>
+<tr>
+<td>H6</td>
+<td><strong>设备侧计时口径</strong>：<code>torch.npu.synchronize()</code> 前后取墙钟</td>
+<td>脚本</td>
+<td style="text-align: right;">9</td>
+<td>恒开（只影响日志）</td>
+</tr>
+</tbody>
+</table></div>
+<p>不在上表、且已<strong>回退为参考实现</strong>的项：HF 依赖延迟导入（0 行）、合成数据集（删除）、<code>ONETRANS_DBG</code> 调试打印（删除）。</p>
+<hr />
+<h2>3. 逐项代码对照</h2>
+<h3>H1 设备初始化（<code>init_device</code>）</h3>
+<pre class="hl"><span style="color: #959077"># 脚本：签名不变，实现委托</span>
+<span style="color:#f92672;font-weight:700">-</span> <span style="color: #66D9EF">def</span><span style="color: #F8F8F2"> </span><span style="color: #A6E22E">parse_device_type</span><span style="color: #F8F8F2">(device:</span> <span style="color: #A6E22E">str</span><span style="color: #F8F8F2">)</span> <span style="color: #FF4689">-&gt;</span> <span style="color: #A6E22E">str</span><span style="color: #F8F8F2">:</span>
+<span style="color:#f92672;font-weight:700">-</span>     <span style="color: #66D9EF">return</span> <span style="color: #F8F8F2">torch</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">device(device)</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">type</span>
+<span style="color:#a6e22e;font-weight:700">+</span> <span style="color: #66D9EF">def</span><span style="color: #F8F8F2"> </span><span style="color: #A6E22E">parse_device_type</span><span style="color: #F8F8F2">(device:</span> <span style="color: #A6E22E">str</span><span style="color: #F8F8F2">)</span> <span style="color: #FF4689">-&gt;</span> <span style="color: #A6E22E">str</span><span style="color: #F8F8F2">:</span>
+<span style="color:#a6e22e;font-weight:700">+</span><span style="color: #F8F8F2">     </span><span style="color: #E6DB74">"""[NPU] 保留原签名；实际初始化（含 torch_npu 导入/set_device）在 npu_compat。"""</span>
+<span style="color:#a6e22e;font-weight:700">+</span>     <span style="color: #66D9EF">return</span> <span style="color: #F8F8F2">npu_compat</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">init_device(device)</span>
+
+<span style="color: #959077"># npu_compat.py</span>
+<span style="color:#a6e22e;font-weight:700">+</span> <span style="color: #66D9EF">def</span><span style="color: #F8F8F2"> </span><span style="color: #A6E22E">init_device</span><span style="color: #F8F8F2">(device:</span> <span style="color: #A6E22E">str</span><span style="color: #F8F8F2">)</span> <span style="color: #FF4689">-&gt;</span> <span style="color: #A6E22E">str</span><span style="color: #F8F8F2">:</span>
+<span style="color:#a6e22e;font-weight:700">+</span>     <span style="color: #F8F8F2">device_type</span> <span style="color: #FF4689">=</span> <span style="color: #F8F8F2">torch</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">device(device)</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">type</span>
+<span style="color:#a6e22e;font-weight:700">+</span>     <span style="color: #66D9EF">if</span> <span style="color: #F8F8F2">device_type</span> <span style="color: #FF4689">==</span> <span style="color: #E6DB74">"npu"</span><span style="color: #F8F8F2">:</span>
+<span style="color:#a6e22e;font-weight:700">+</span>         <span style="color: #FF4689">import</span><span style="color: #F8F8F2"> torch_npu</span>          <span style="color: #959077"># 必须先于任何 npu 张量</span>
+<span style="color:#a6e22e;font-weight:700">+</span>         <span style="color: #F8F8F2">torch</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">npu</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">set_device(</span><span style="color: #AE81FF">0</span><span style="color: #F8F8F2">)</span>
+<span style="color:#a6e22e;font-weight:700">+</span>     <span style="color: #66D9EF">return</span> <span style="color: #F8F8F2">device_type</span>
+</pre>
+<p>为什么是硬件相关：<code>npu</code> 不是 <code>cuda</code> 的别名，<code>torch_npu</code> 必须在建任何 npu 张量前导入，且设备要显式 <code>set_device</code>。原脚本 <code>--device</code> 默认 <code>cuda if torch.cuda.is_available() else cpu</code>，在昇腾机器上会<strong>静默落 CPU</strong>（能跑、慢一个量级、不报错）。判据：日志首行 <code>soc=Ascend950DT_9582</code>。</p>
+<h3>H2 混合精度能力门（NPU 只放行 bf16）</h3>
+<pre class="hl"><span style="color:#f92672;font-weight:700">-</span> <span style="color: #66D9EF">def</span><span style="color: #F8F8F2"> </span><span style="color: #A6E22E">should_enable_amp</span><span style="color: #F8F8F2">(device_type,</span> <span style="color: #F8F8F2">amp,</span> <span style="color: #F8F8F2">amp_dtype):</span>
+<span style="color:#f92672;font-weight:700">-</span>     <span style="color: #66D9EF">if</span> <span style="color: #FF4689">not</span> <span style="color: #F8F8F2">amp:</span> <span style="color: #66D9EF">return</span> <span style="color: #66D9EF">False</span>
+<span style="color:#f92672;font-weight:700">-</span>     <span style="color: #66D9EF">if</span> <span style="color: #F8F8F2">device_type</span> <span style="color: #FF4689">!=</span> <span style="color: #E6DB74">"cuda"</span><span style="color: #F8F8F2">:</span> <span style="color: #66D9EF">return</span> <span style="color: #66D9EF">False</span>            <span style="color: #959077"># ← NPU 上 AMP 在此被静默关掉</span>
+<span style="color:#f92672;font-weight:700">-</span>     <span style="color: #66D9EF">if</span> <span style="color: #F8F8F2">amp_dtype</span> <span style="color: #FF4689">==</span> <span style="color: #E6DB74">"bf16"</span> <span style="color: #FF4689">and</span> <span style="color: #FF4689">not</span> <span style="color: #F8F8F2">torch</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">cuda</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">is_bf16_supported():</span> <span style="color: #66D9EF">return</span> <span style="color: #66D9EF">False</span>
+<span style="color:#f92672;font-weight:700">-</span>     <span style="color: #66D9EF">return</span> <span style="color: #66D9EF">True</span>
+<span style="color:#f92672;font-weight:700">-</span> <span style="color: #66D9EF">def</span><span style="color: #F8F8F2"> </span><span style="color: #A6E22E">build_scaler</span><span style="color: #F8F8F2">(device_type,</span> <span style="color: #F8F8F2">use_amp,</span> <span style="color: #F8F8F2">amp_dtype):</span>
+<span style="color:#f92672;font-weight:700">-</span>     <span style="color: #F8F8F2">enabled</span> <span style="color: #FF4689">=</span> <span style="color: #F8F8F2">use_amp</span> <span style="color: #FF4689">and</span> <span style="color: #F8F8F2">device_type</span> <span style="color: #FF4689">==</span> <span style="color: #E6DB74">"cuda"</span> <span style="color: #FF4689">and</span> <span style="color: #F8F8F2">amp_dtype</span> <span style="color: #FF4689">==</span> <span style="color: #F8F8F2">torch</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">float16</span>
+<span style="color:#f92672;font-weight:700">-</span>     <span style="color: #66D9EF">return</span> <span style="color: #F8F8F2">torch</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">amp</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">GradScaler(device</span><span style="color: #FF4689">=</span><span style="color: #F8F8F2">device_type,</span> <span style="color: #F8F8F2">enabled</span><span style="color: #FF4689">=</span><span style="color: #F8F8F2">enabled)</span>
+<span style="color:#a6e22e;font-weight:700">+</span> <span style="color: #66D9EF">def</span><span style="color: #F8F8F2"> </span><span style="color: #A6E22E">should_enable_amp</span><span style="color: #F8F8F2">(device_type,</span> <span style="color: #F8F8F2">amp,</span> <span style="color: #F8F8F2">amp_dtype):</span>
+<span style="color:#a6e22e;font-weight:700">+</span>     <span style="color: #66D9EF">return</span> <span style="color: #F8F8F2">npu_compat</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">should_enable_amp(device_type,</span> <span style="color: #F8F8F2">amp,</span> <span style="color: #F8F8F2">amp_dtype)</span>
+<span style="color:#a6e22e;font-weight:700">+</span> <span style="color: #66D9EF">def</span><span style="color: #F8F8F2"> </span><span style="color: #A6E22E">build_scaler</span><span style="color: #F8F8F2">(device_type,</span> <span style="color: #F8F8F2">use_amp,</span> <span style="color: #F8F8F2">amp_dtype):</span>
+<span style="color:#a6e22e;font-weight:700">+</span>     <span style="color: #66D9EF">return</span> <span style="color: #F8F8F2">npu_compat</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">build_scaler(device_type,</span> <span style="color: #F8F8F2">use_amp,</span> <span style="color: #F8F8F2">amp_dtype)</span>   <span style="color: #959077"># NPU → no-op scaler</span>
+</pre>
+<div class="tw"><table>
+<thead>
+<tr>
+<th>组合</th>
+<th>昇腾上可用</th>
+<th>处置</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>npu + bf16</td>
+<td>✅</td>
+<td>放行；bf16 动态范围同 fp32，不需要 scaler</td>
+</tr>
+<tr>
+<td>npu + fp16</td>
+<td>❌ 无可用 GradScaler</td>
+<td>禁用 AMP、回落 fp32，日志写明</td>
+</tr>
+<tr>
+<td>cuda + fp16/bf16</td>
+<td>✅</td>
+<td>原逻辑不变</td>
+</tr>
+</tbody>
+</table></div>
+<p>no-op scaler 保留 <code>scale/step/update/unscale_</code> 调用形态，训练循环不用改。判据：<code>amp=True amp_dtype=bf16 grad_scaler=False</code>；实测 <code>get_autocast_dtype("npu")</code> 默认是 <strong>fp16</strong>，所以 <code>bfloat16</code> 必须显式传。</p>
+<h3>H3 多卡 HCCL/DDP 装配</h3>
+<pre class="hl"><span style="color:#a6e22e;font-weight:700">+</span> <span style="color: #F8F8F2">rank,</span> <span style="color: #F8F8F2">world_size,</span> <span style="color: #F8F8F2">local_rank</span> <span style="color: #FF4689">=</span> <span style="color: #F8F8F2">npu_compat</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">init_distributed()</span>   <span style="color: #959077"># WORLD_SIZE&lt;=1 → (0,1,0)，行为不变</span>
+<span style="color:#a6e22e;font-weight:700">+</span> <span style="color: #66D9EF">if</span> <span style="color: #F8F8F2">world_size</span> <span style="color: #FF4689">&gt;</span> <span style="color: #AE81FF">1</span><span style="color: #F8F8F2">:</span>
+<span style="color:#a6e22e;font-weight:700">+</span>     <span style="color: #F8F8F2">args</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">device</span> <span style="color: #FF4689">=</span> <span style="color: #E6DB74">f"{</span><span style="color: #F8F8F2">device_type</span><span style="color: #E6DB74">}:{</span><span style="color: #F8F8F2">local_rank</span><span style="color: #E6DB74">}"</span>
+<span style="color:#a6e22e;font-weight:700">+</span> <span style="color: #F8F8F2">is_main</span> <span style="color: #FF4689">=</span> <span style="color: #F8F8F2">rank</span> <span style="color: #FF4689">==</span> <span style="color: #AE81FF">0</span>
+<span style="color:#a6e22e;font-weight:700">+</span> <span style="color: #F8F8F2">log</span> <span style="color: #FF4689">=</span> <span style="color: #A6E22E">print</span> <span style="color: #66D9EF">if</span> <span style="color: #F8F8F2">is_main</span> <span style="color: #66D9EF">else</span> <span style="color: #F8F8F2">(</span><span style="color: #66D9EF">lambda</span> <span style="color: #FF4689">*</span><span style="color: #F8F8F2">a,</span> <span style="color: #FF4689">**</span><span style="color: #F8F8F2">k:</span> <span style="color: #66D9EF">None</span><span style="color: #F8F8F2">)</span>
+
+<span style="color:#a6e22e;font-weight:700">+</span> <span style="color: #66D9EF">if</span> <span style="color: #F8F8F2">world_size</span> <span style="color: #FF4689">&gt;</span> <span style="color: #AE81FF">1</span><span style="color: #F8F8F2">:</span>
+<span style="color:#a6e22e;font-weight:700">+</span>     <span style="color: #F8F8F2">model</span> <span style="color: #FF4689">=</span> <span style="color: #F8F8F2">nn</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">parallel</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">DistributedDataParallel(</span>
+<span style="color:#a6e22e;font-weight:700">+</span>         <span style="color: #F8F8F2">model,</span> <span style="color: #F8F8F2">device_ids</span><span style="color: #FF4689">=</span><span style="color: #F8F8F2">[local_rank],</span> <span style="color: #F8F8F2">find_unused_parameters</span><span style="color: #FF4689">=not</span> <span style="color: #F8F8F2">args</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">ddp_strict,</span>
+<span style="color:#a6e22e;font-weight:700">+</span>         <span style="color: #F8F8F2">broadcast_buffers</span><span style="color: #FF4689">=</span><span style="color: #66D9EF">False</span><span style="color: #F8F8F2">)</span>
+
+<span style="color: #959077"># 数据：训练集按 rank 切分；验证集只在 rank0 全量</span>
+<span style="color:#a6e22e;font-weight:700">+</span> <span style="color: #F8F8F2">train_idx</span> <span style="color: #FF4689">=</span> <span style="color: #F8F8F2">train_idx[rank::world_size]</span>
+<span style="color:#a6e22e;font-weight:700">+</span> <span style="color: #66D9EF">if</span> <span style="color: #F8F8F2">rank</span> <span style="color: #FF4689">!=</span> <span style="color: #AE81FF">0</span><span style="color: #F8F8F2">:</span>
+<span style="color:#a6e22e;font-weight:700">+</span>     <span style="color: #F8F8F2">val_idx</span> <span style="color: #FF4689">=</span> <span style="color: #F8F8F2">val_idx[:</span><span style="color: #AE81FF">0</span><span style="color: #F8F8F2">]</span>
+</pre>
+<p><code>npu_compat.init_distributed()</code>：</p>
+<pre class="hl"><span style="color:#a6e22e;font-weight:700">+</span> <span style="color: #F8F8F2">world_size</span> <span style="color: #FF4689">=</span> <span style="color: #A6E22E">int</span><span style="color: #F8F8F2">(os</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">environ</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">get(</span><span style="color: #E6DB74">"WORLD_SIZE"</span><span style="color: #F8F8F2">,</span> <span style="color: #E6DB74">"1"</span><span style="color: #F8F8F2">))</span>
+<span style="color:#a6e22e;font-weight:700">+</span> <span style="color: #66D9EF">if</span> <span style="color: #F8F8F2">world_size</span> <span style="color: #FF4689">&lt;=</span> <span style="color: #AE81FF">1</span><span style="color: #F8F8F2">:</span>
+<span style="color:#a6e22e;font-weight:700">+</span>     <span style="color: #66D9EF">return</span> <span style="color: #AE81FF">0</span><span style="color: #F8F8F2">,</span> <span style="color: #AE81FF">1</span><span style="color: #F8F8F2">,</span> <span style="color: #AE81FF">0</span>                    <span style="color: #959077"># 单进程路径完全不变</span>
+<span style="color:#a6e22e;font-weight:700">+</span> <span style="color: #F8F8F2">local_rank</span> <span style="color: #FF4689">=</span> <span style="color: #A6E22E">int</span><span style="color: #F8F8F2">(os</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">environ</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">get(</span><span style="color: #E6DB74">"LOCAL_RANK"</span><span style="color: #F8F8F2">,</span> <span style="color: #E6DB74">"0"</span><span style="color: #F8F8F2">))</span>
+<span style="color:#a6e22e;font-weight:700">+</span> <span style="color: #F8F8F2">torch</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">npu</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">set_device(local_rank)</span>    <span style="color: #959077"># ASCEND_RT_VISIBLE_DEVICES 已重编号</span>
+<span style="color:#a6e22e;font-weight:700">+</span> <span style="color: #F8F8F2">dist</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">init_process_group(backend</span><span style="color: #FF4689">=</span><span style="color: #E6DB74">"hccl"</span><span style="color: #F8F8F2">,</span> <span style="color: #F8F8F2">timeout</span><span style="color: #FF4689">=</span><span style="color: #F8F8F2">datetime</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">timedelta(minutes</span><span style="color: #FF4689">=</span><span style="color: #AE81FF">10</span><span style="color: #F8F8F2">))</span>
+</pre>
+<p>三条与生产 <code>zeus-onetrans</code> 一致的硬件约定：</p>
+<ol>
+<li><code>device_ids=[local_rank]</code> + <code>broadcast_buffers=False</code> + <code>find_unused_parameters=True</code>（该模型最深金字塔块有 16 个参数不参与前向，不开会报 <code>Expected to have finished reduction</code>）；</li>
+<li><strong>训练循环里不做任何跨 rank 归约</strong>：训练集切分 + rank0 全量验证，指标天然是全集口径。实测在 epoch 末加 <code>all_gather</code> 会卡在 D2H 拷贝（py-spy 栈停在 <code>b.cpu()</code>）；<code>all_gather_object</code> 更早一步卡在 pickle；</li>
+<li>HCCL 标量归约只吃 float32（fp64 报 <code>Unsupported data type at::kDouble</code>），<code>all_reduce(MAX)</code> 在 float 上会静默卡住。</li>
+</ol>
+<h3>H4 attention kernel 落点（<code>main_pytorch.py</code>，9 行）</h3>
+<pre class="hl"><span style="color:#a6e22e;font-weight:700">+</span> <span style="color: #F8F8F2">_MASK_DTYPE</span> <span style="color: #FF4689">=</span> <span style="color: #F8F8F2">os</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">environ</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">get(</span><span style="color: #E6DB74">"ONETRANS_ATTN_MASK"</span><span style="color: #F8F8F2">,</span> <span style="color: #E6DB74">"float"</span><span style="color: #F8F8F2">)</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">lower()</span>   <span style="color: #959077"># 默认 float = 原行为</span>
+  <span style="color: #FF4689">...</span>
+  <span style="color: #66D9EF">if</span> <span style="color: #A6E22E">self</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">mask_type</span> <span style="color: #FF4689">==</span> <span style="color: #E6DB74">"paper_causal"</span><span style="color: #F8F8F2">:</span>
+      <span style="color: #F8F8F2">allowed</span> <span style="color: #FF4689">=</span> <span style="color: #F8F8F2">col_idx</span> <span style="color: #FF4689">&lt;=</span> <span style="color: #F8F8F2">q_abs</span>
+<span style="color:#a6e22e;font-weight:700">+</span>     <span style="color: #66D9EF">if</span> <span style="color: #F8F8F2">_MASK_DTYPE</span> <span style="color: #FF4689">==</span> <span style="color: #E6DB74">"bool"</span><span style="color: #F8F8F2">:</span>
+<span style="color:#a6e22e;font-weight:700">+</span>         <span style="color: #66D9EF">return</span> <span style="color: #F8F8F2">allowed</span>                 <span style="color: #959077"># bool: True = 参与</span>
+      <span style="color: #66D9EF">return</span> <span style="color: #F8F8F2">mask</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">masked_fill(</span><span style="color: #FF4689">~</span><span style="color: #F8F8F2">allowed,</span> <span style="color: #F8F8F2">torch</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">finfo(dtype)</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">min)</span>
+  <span style="color: #FF4689">...</span>
+  <span style="color: #66D9EF">if</span> <span style="color: #A6E22E">self</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">mask_type</span> <span style="color: #FF4689">==</span> <span style="color: #E6DB74">"hard_mask"</span><span style="color: #F8F8F2">:</span>
+<span style="color:#a6e22e;font-weight:700">+</span>     <span style="color: #66D9EF">if</span> <span style="color: #F8F8F2">_MASK_DTYPE</span> <span style="color: #FF4689">==</span> <span style="color: #E6DB74">"bool"</span><span style="color: #F8F8F2">:</span>
+<span style="color:#a6e22e;font-weight:700">+</span>         <span style="color: #66D9EF">return</span> <span style="color: #F8F8F2">origin_allowed</span>
+</pre>
+<p>为什么是硬件相关：<strong>mask 的 dtype 直接决定 SDPA 在 950 上走哪个 kernel</strong>（实测 B=8/H=4/S=64/D=16，bf16）：</p>
+<div class="tw"><table>
+<thead>
+<tr>
+<th>mask 形态</th>
+<th>kernel 构成</th>
+<th style="text-align: right;">单次 attention</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>float 加性（原实现）</td>
+<td><code>Cast×15 + Muls×6 + BatchMatMulV3×6 + SoftmaxV2×3 + SelectV2</code>… 45 个 kernel</td>
+<td style="text-align: right;">46.3 µs</td>
+</tr>
+<tr>
+<td>bool</td>
+<td><code>FlashAttentionScoreV4×3 + LogicalNot×3</code>，6 个 kernel</td>
+<td style="text-align: right;"><strong>12.3 µs（3.8×）</strong></td>
+</tr>
+<tr>
+<td>无 mask</td>
+<td><code>FlashAttentionScoreV4×3</code></td>
+<td style="text-align: right;">9.3 µs</td>
+</tr>
+</tbody>
+</table></div>
+<p>只对 <code>paper_causal</code> / <code>hard_mask</code>（0/-inf 型）转换；<code>origin</code>（+1e-9 偏置）与 <code>bimask_soft</code>（0/1 加性偏置）是软偏置，转 bool 会改语义。端到端收益仅 +1.6%（S=64）/ +3.7%（S=256），因为该实现成本主要在多组小矩阵。</p>
+<h3>H5 设备收尾</h3>
+<pre class="hl"><span style="color:#a6e22e;font-weight:700">+</span> <span style="color: #F8F8F2">npu_compat</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">shutdown()</span>          <span style="color: #959077"># torch.npu.synchronize() + destroy_process_group()</span>
+<span style="color:#a6e22e;font-weight:700">+</span> <span style="color: #66D9EF">if</span> <span style="color: #F8F8F2">world_size</span> <span style="color: #FF4689">&gt;</span> <span style="color: #AE81FF">1</span><span style="color: #F8F8F2">:</span>
+<span style="color:#a6e22e;font-weight:700">+</span>     <span style="color: #F8F8F2">sys</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">stdout</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">flush();</span> <span style="color: #F8F8F2">sys</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">stderr</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">flush()</span>
+<span style="color:#a6e22e;font-weight:700">+</span>     <span style="color: #F8F8F2">os</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">_exit(</span><span style="color: #AE81FF">0</span><span style="color: #F8F8F2">)</span>                <span style="color: #959077"># 跳过解释器 teardown</span>
+</pre>
+<p>实测：训练跑完后非 0 号 rank 在解释器退出阶段收到 <strong>SIGSEGV(-11) / SIGBUS(-7)</strong>，<code>torchrun</code> 因此报 <code>ChildFailedError</code> —— 失败发生在 teardown，训练本身已完成。另实测 HCCL 固定端口 16666 会被上一次挂死进程占住（<code>Bind_IP_Port(EI0020)</code>），起跑前须清残留进程。</p>
+<h3>H6 设备侧计时口径</h3>
+<pre class="hl"><span style="color:#a6e22e;font-weight:700">+</span> <span style="color: #66D9EF">if</span> <span style="color: #F8F8F2">device_type</span> <span style="color: #FF4689">==</span> <span style="color: #E6DB74">"npu"</span><span style="color: #F8F8F2">:</span>
+<span style="color:#a6e22e;font-weight:700">+</span>     <span style="color: #F8F8F2">torch</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">npu</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">synchronize()</span>      <span style="color: #959077"># 取墙钟前后都同步，否则量到的是下发时间</span>
+<span style="color:#a6e22e;font-weight:700">+</span> <span style="color: #F8F8F2">t_epoch</span> <span style="color: #FF4689">=</span> <span style="color: #F8F8F2">time</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">perf_counter()</span>
+  <span style="color: #FF4689">...</span> <span style="color: #F8F8F2">训练</span> <span style="color: #FF4689">/</span> <span style="color: #F8F8F2">验证</span> <span style="color: #FF4689">...</span>
+<span style="color:#a6e22e;font-weight:700">+</span> <span style="color: #66D9EF">if</span> <span style="color: #F8F8F2">device_type</span> <span style="color: #FF4689">==</span> <span style="color: #E6DB74">"npu"</span><span style="color: #F8F8F2">:</span>
+<span style="color:#a6e22e;font-weight:700">+</span>     <span style="color: #F8F8F2">torch</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">npu</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">synchronize()</span>
+<span style="color:#a6e22e;font-weight:700">+</span> <span style="color: #F8F8F2">wall</span> <span style="color: #FF4689">=</span> <span style="color: #F8F8F2">time</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">perf_counter()</span> <span style="color: #FF4689">-</span> <span style="color: #F8F8F2">t_epoch</span>
+<span style="color:#a6e22e;font-weight:700">+</span> <span style="color: #F8F8F2">log(</span><span style="color: #E6DB74">f"[perf] step_ms={</span><span style="color: #F8F8F2">wall </span><span style="color: #FF4689">/</span><span style="color: #F8F8F2"> </span><span style="color: #A6E22E">max</span><span style="color: #F8F8F2">(</span><span style="color: #A6E22E">len</span><span style="color: #F8F8F2">(train_loader),</span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">)</span><span style="color: #FF4689">*</span><span style="color: #AE81FF">1000</span><span style="color: #E6DB74">:.1f} "</span>
+<span style="color:#a6e22e;font-weight:700">+</span>     <span style="color: #E6DB74">f"global_samples_per_s={</span><span style="color: #F8F8F2">args</span><span style="color: #FF4689">.</span><span style="color: #F8F8F2">batch_size </span><span style="color: #FF4689">*</span><span style="color: #F8F8F2"> world_size </span><span style="color: #FF4689">/</span><span style="color: #F8F8F2"> (wall </span><span style="color: #FF4689">/</span><span style="color: #F8F8F2"> </span><span style="color: #A6E22E">max</span><span style="color: #F8F8F2">(</span><span style="color: #A6E22E">len</span><span style="color: #F8F8F2">(train_loader),</span><span style="color: #AE81FF">1</span><span style="color: #F8F8F2">))</span><span style="color: #E6DB74">:.1f} ..."</span><span style="color: #F8F8F2">)</span>
+</pre>
+<hr />
+<h2>4. 数据路径与 GPU 完全一致（非硬件改动已回退）</h2>
+<div class="tw"><table>
+<thead>
+<tr>
+<th>项</th>
+<th>v1 状态</th>
+<th>v2 状态</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>数据集</td>
+<td>新增 <code>--synthetic</code> 合成集（无 HF 栈时的替代）</td>
+<td><strong>删除</strong>；只走 <code>load_train_split()</code>（HF <code>TAAC2026/data_sample_1000</code> 或 <code>--local-parquet</code>），与参考实现同一入口</td>
+</tr>
+<tr>
+<td><code>utils/taac_data.py</code></td>
+<td>12 行改动（HF 延迟导入）</td>
+<td><strong>0 行</strong>（HF 栈 <code>datasets 5.2.0 / huggingface_hub 2.4.0 / pyarrow 26.0.1</code> 已装入容器）</td>
+</tr>
+<tr>
+<td><code>utils/common.py</code></td>
+<td>3 行改动</td>
+<td><strong>0 行</strong></td>
+</tr>
+<tr>
+<td><code>ONETRANS_DBG</code> 调试打印</td>
+<td>8 行</td>
+<td><strong>删除</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p>环境要求（写在报告里而不是藏在代码里）：容器需装 HF 栈，并设 <code>HF_ENDPOINT=https://hf-mirror.com</code>（容器内 <code>huggingface.co</code> 不可达：curl <code>000</code>；<code>hf-mirror.com</code> <code>200</code>）。</p>
+<hr />
+<h2>5. 零改动证据与新增资产</h2>
+<div class="tw"><table>
+<thead>
+<tr>
+<th>证据</th>
+<th>命令</th>
+<th>结果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>参考仓干净</td>
+<td><code>git -C GPU_Reference status --porcelain</code></td>
+<td>空</td>
+</tr>
+<tr>
+<td>commit 锁定</td>
+<td><code>git -C GPU_Reference rev-parse HEAD</code></td>
+<td><code>8febd7e…</code>（<code>REFERENCE_COMMIT.txt</code>）</td>
+</tr>
+<tr>
+<td>四个文件逐字一致</td>
+<td><code>diff -u GPU_Reference/&lt;f&gt; OneTrans_NPU/&lt;f&gt;</code></td>
+<td><code>models/taac_onetrans.py</code>、<code>utils/metrics.py</code>、<code>utils/common.py</code>、<code>utils/taac_data.py</code> 均 0 行</td>
+</tr>
+</tbody>
+</table></div>
+<p>新增（不是"修改"）：<code>npu_compat.py</code>（160 行，硬件兼容层）、<code>tests/</code> 11 个探针（1,035 行，覆盖冒烟/精度/梯度等价/HCCL dtype/AMP/mask 落点）。</p>
+<hr />
+<h2>6. 改动后的实测（全部用与 GPU 相同的数据集）</h2>
+<div class="tw"><table>
+<thead>
+<tr>
+<th>验证</th>
+<th>实测</th>
+<th>判据</th>
+<th>结论</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>冒烟</td>
+<td>3 步 loss 1.6105→0.7949、<code>param_delta=3.008e-03</code>、稳态 79–80 ms/步</td>
+<td>有限 + 有更新 + 下降</td>
+<td>PASS</td>
+</tr>
+<tr>
+<td>精度 A（NPU fp32 vs CPU fp32）</td>
+<td>max|Δ|=1.49e-7，cos 0.99999988</td>
+<td>≤1e-4 / cos≥0.99999</td>
+<td>PASS</td>
+</tr>
+<tr>
+<td>精度 B（NPU bf16 vs CPU fp32）</td>
+<td>max|Δ|=2.59e-3，cos 0.99998170</td>
+<td>≤2e-2 / cos≥0.9995</td>
+<td>PASS</td>
+</tr>
+<tr>
+<td>精度 C（10 步轨迹）</td>
+<td>Δloss=5.96e-8、Δacc=0</td>
+<td>Δloss≤1e-2 / Δacc≤2pp</td>
+<td>PASS</td>
+</tr>
+<tr>
+<td>真数据集单卡（1000 行，5 epoch，batch 32）</td>
+<td>25 步/epoch、78.5 ms/步、406 samples/s</td>
+<td>能训、指标产出</td>
+<td>PASS</td>
+</tr>
+<tr>
+<td>真数据集 2 卡（每卡 32）</td>
+<td>13 步/epoch、95.5–98.6 ms/步、636–670 samples/s</td>
+<td>torchrun 无报错</td>
+<td>PASS</td>
+</tr>
+<tr>
+<td>多卡梯度等价（W=2，fp32）</td>
+<td><code>worst rel\|Δg\|=1.2e-6</code>、Δloss=0</td>
+<td>≤1e-5</td>
+<td>PASS</td>
+</tr>
+<tr>
+<td>AMP 生效性</td>
+<td>ctx 内 <code>is_autocast_enabled=True</code>、matmul 输出 bf16、默认 dtype=fp16</td>
+<td>生效标志 + 输出 dtype</td>
+<td>PASS</td>
+</tr>
+<tr>
+<td>AMP 划算性</td>
+<td>fp32 54.3 ms vs bf16 69.3 ms（慢 27.5%），HBM 109→99 MiB</td>
+<td>同进程 A/B</td>
+<td><strong>负收益，默认 fp32</strong></td>
+</tr>
+</tbody>
+</table></div>
+<h3>扩展性（真数据集 <code>data_sample_1000</code>，每卡本地 batch 64，8 epoch）</h3>
+<div class="tw"><table>
+<thead>
+<tr>
+<th style="text-align: right;">die</th>
+<th style="text-align: right;">每 epoch 步数</th>
+<th style="text-align: right;">稳态 step</th>
+<th style="text-align: right;">samples/s</th>
+<th style="text-align: right;">加速比</th>
+<th style="text-align: right;">每卡效率</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">13</td>
+<td style="text-align: right;">75.3 ms</td>
+<td style="text-align: right;">850.0</td>
+<td style="text-align: right;">1.00×</td>
+<td style="text-align: right;">100%</td>
+</tr>
+<tr>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">7</td>
+<td style="text-align: right;">98.2 ms</td>
+<td style="text-align: right;">1 303.5</td>
+<td style="text-align: right;"><strong>1.53×</strong></td>
+<td style="text-align: right;">76.7%</td>
+</tr>
+<tr>
+<td style="text-align: right;">4</td>
+<td style="text-align: right;">4</td>
+<td style="text-align: right;">108.1 ms</td>
+<td style="text-align: right;">2 367.8</td>
+<td style="text-align: right;"><strong>2.79×</strong></td>
+<td style="text-align: right;">69.6%</td>
+</tr>
+<tr>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">136.3 ms</td>
+<td style="text-align: right;">3 755.6</td>
+<td style="text-align: right;"><strong>4.42×</strong></td>
+<td style="text-align: right;">55.2%</td>
+</tr>
+</tbody>
+</table></div>
+<p>口径说明：数据集只有 1000 行（train 800），8 卡时每 epoch 仅 2 步 ⇒ 8 卡数字<strong>仅供参考</strong>（稳态 7 个 epoch = 14 步）。要更稳的扩展比需要更大数据集或更长 epoch 数。</p>
+<hr />
+<h2>7. 风险与回退</h2>
+<div class="tw"><table>
+<thead>
+<tr>
+<th>改动</th>
+<th>风险</th>
+<th>回退</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>bool mask</td>
+<td><code>True</code> = 参与，与 float 的 <code>-inf</code> 相反，写反会静默改训练结果</td>
+<td>不设 <code>ONETRANS_ATTN_MASK</code>（默认 float）= 原行为</td>
+</tr>
+<tr>
+<td>DDP 包壳</td>
+<td>有参子模块漏包会导致各 rank 参数漂移</td>
+<td>本实现单一 model；扩展时须把有参子模块都包进 DDP</td>
+</tr>
+<tr>
+<td><code>find_unused_parameters=True</code></td>
+<td>每步多一次图遍历开销</td>
+<td>确认每步用满参数后 <code>--ddp-strict</code> 关闭</td>
+</tr>
+<tr>
+<td>stride 切分</td>
+<td>每 rank 样本数差 ≤1，末批 batch 略不齐</td>
+<td>影响只在指标第 4 位小数</td>
+</tr>
+<tr>
+<td><code>os._exit(0)</code></td>
+<td>跳过解释器收尾（已显式 flush）</td>
+<td>仅多卡路径</td>
+</tr>
+</tbody>
+</table></div>
+<hr />
+<h2>8. 边界</h2>
+<ol>
+<li>数据集只有 1000 行（官方 <code>data_sample_1000</code>），<strong>不下任务效果结论</strong>；8 卡扩展比样本量偏少。</li>
+<li>只测单机 8 die；跨机 16 卡（122+111，<code>ub_verbs --apply 8</code> + env 化 rendezvous）未做。</li>
+<li>未做长时间收敛验证（5–8 epoch 只证明能训、指标下降）。</li>
+<li>扩展比绑定模型规模（6.0M 参数）；换模型/换 batch 需重测。</li>
+<li><code>origin</code> / <code>bimask_soft</code> / <code>bimask_hard</code> 三种软偏置 mask 未逐一验数值。</li>
+</ol>
+</div>
+</body></html>

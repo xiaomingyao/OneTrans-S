@@ -1,0 +1,48 @@
+# GPU 参考实现 vs NPU 迁移实现：数值与 mask 语义对照
+# 环境：参考侧 CPU(torch 2.7.1+cpu) / 迁移侧 npu:0(Ascend950DT_9582, torch_npu 2.7.1.post4)
+# 配置：non_seq_dim=183 seq_feature_dim=45 seq_len=32 ns_len=8 d_model=64 heads=4 ffn=128 multi=2 pyramid=3 mask=paper_causal B=8 seed=1234
+# 采集：2026-11-14
+
+===== GPU 实现(CPU 执行) vs NPU 实现：同权重同输入 =====
+
+-- NPU fp32 --
+  logits (B×C)           max|Δ|=1.788e-07  rel=5.92e-07  cos=1.00000000
+  loss (标量)              max|Δ|=5.960e-08  rel=8.96e-08  cos=1.00000000
+  参数逐位相同: keys_equal=True max|Δ|=0.000e+00
+  梯度 rel_max=1.205e-06 (n=747，其中数值零梯度 2 个，判零阈值 1.0e-08，全局 |g|max=1.493e-01)
+    stack_blocks.0.otb_list.1.cma.kqv_list.3.0.weight rel=1.20e-06 cos=1.00000000
+    stack_blocks.1.otb_list.0.cma.kqv_list.8.0.bias rel=1.18e-06 cos=1.00000000
+    stack_blocks.1.otb_list.0.cma.kqv_list.0.1.bias rel=1.18e-06 cos=1.00000000
+    stack_blocks.1.otb_list.0.cma.kqv_list.1.0.bias rel=1.17e-06 cos=1.00000000
+    stack_blocks.2.otb_list.0.cma.kqv_list.8.0.bias rel=1.09e-06 cos=1.00000000
+
+-- NPU bf16 --
+  logits (B×C)           max|Δ|=2.313e-03  rel=7.66e-03  cos=0.99997882
+  loss (标量)              max|Δ|=2.797e-04  rel=4.20e-04  cos=1.00000000
+  参数逐位相同: keys_equal=True max|Δ|=0.000e+00
+  梯度 rel_max=1.817e-02 (n=747，其中数值零梯度 2 个，判零阈值 1.0e-08，全局 |g|max=1.494e-01)
+    stack_blocks.0.otb_list.0.cma.kqv_list.7.0.weight rel=1.82e-02 cos=0.99992207
+    stack_blocks.1.otb_list.0.cma.kqv_list.7.1.bias rel=1.61e-02 cos=0.99993310
+    base_block.otb_list.0.cma.kqv_list.2.0.bias    rel=1.59e-02 cos=0.99994636
+    stack_blocks.1.otb_list.0.cma.kqv_list.1.0.bias rel=1.58e-02 cos=0.99991409
+    base_block.otb_list.0.cma.kqv_list.4.0.bias    rel=1.57e-02 cos=0.99994466
+{"fp32": {"grad_max_rel": 1.2048232447994406e-06, "n_zero_grad": 2, "param_max_abs": 0.0}, "bf16": {"grad_max_rel": 0.0181740489354768, "n_zero_grad": 2, "param_max_abs": 0.0}}
+EXIT=0
+[ref] paper_causal:dtype=torch.float32, hard_mask:dtype=torch.float32, origin:dtype=torch.float32, bimask_soft:dtype=torch.float32
+[npu_float] paper_causal:dtype=torch.float32, hard_mask:dtype=torch.float32, origin:dtype=torch.float32, bimask_soft:dtype=torch.float32
+[npu_bool] paper_causal:dtype=torch.bool, hard_mask:dtype=torch.bool, origin:dtype=torch.float32, bimask_soft:dtype=torch.float32
+
+| mask_type | float 两侧 max\|Δ\| | bool 两侧 dtype | 允许集一致 | 语义 |
+|---|---|---|---|---|
+| paper_causal | 0.0e+00 | torch.bool | True | hard（True=参与） |
+| hard_mask | 0.0e+00 | torch.bool | True | hard（True=参与） |
+| origin | 0.0e+00 | torch.float32 | True | 软偏置，bool 开关不生效 |
+| bimask_soft | 0.0e+00 | torch.float32 | True | 软偏置，bool 开关不生效 |
+
+paper_causal 允许位（ref float→ 1 表示允许；bool → True 表示参与）：
+  ref  [1, 0, 0, 0, 0, 0]  bool [1, 0, 0, 0, 0, 0]
+  ref  [1, 1, 0, 0, 0, 0]  bool [1, 1, 0, 0, 0, 0]
+  ref  [1, 1, 1, 0, 0, 0]  bool [1, 1, 1, 0, 0, 0]
+
+MASK-SEMANTICS PASS
+EXIT=0

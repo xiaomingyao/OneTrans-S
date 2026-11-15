@@ -1,0 +1,7 @@
+Device_id,Name,Type,Accelerator Core,Start Time(us),Duration(us),Wait Time(us),Block Num
+0,aclnnLogicalNot_LogicalNotAiCore_LogicalNot,N/A,N/A,1794630338614783.137	,3.712,0,1
+0,aclnnFlashAttentionScoreV4_FlashAttentionScore_FlashAttentionScore,N/A,N/A,1794630338720186.450	,11.487,105399.538000,32
+0,aclnnLogicalNot_LogicalNotAiCore_LogicalNot,N/A,N/A,1794630338720879.091	,1.457,681.013000,1
+0,aclnnFlashAttentionScoreV4_FlashAttentionScore_FlashAttentionScore,N/A,N/A,1794630338720905.124	,9.172,24.543000,32
+0,aclnnLogicalNot_LogicalNotAiCore_LogicalNot,N/A,N/A,1794630338721122.870	,1.778,208.578000,1
+0,aclnnFlashAttentionScoreV4_FlashAttentionScore_FlashAttentionScore,N/A,N/A,1794630338721141.223	,9.273,16.722000,32

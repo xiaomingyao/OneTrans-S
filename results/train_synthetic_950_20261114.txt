@@ -1,0 +1,17 @@
+[env] {'device_type': 'npu', 'torch': '2.7.1+cpu', 'torch_npu': '2.7.1.post4', 'soc': 'Ascend950DT_9582'}
+[data] synthetic rows=1024 seq_len=32 non_seq_dim=64 seq_feat_dim=32
+[run] metadata
+{
+  "source": "synthetic",
+  "rows": 1024,
+  "seq_len": 32,
+  "non_seq_dim": 64,
+  "seq_feature_dim": 32,
+  "num_classes": 5
+}
+[run] device=npu samples=1024 train=820 val=204
+[run] non_seq=(1024, 64) seq=(1024, 32, 32) classes=5
+[run] amp=True amp_dtype=bf16 grad_scaler=False device_type=npu mask_type=paper_causal pyramid_layers=3 pyramid_align=32 sep_token=True activation_checkpoint=False
+[epoch 01] train_loss=1.4596 train_auc=0.7168 train_acc=0.3951 val_loss=1.2231 val_auc=0.8787 val_acc=0.5833
+[epoch 02] train_loss=0.8922 train_auc=0.9557 train_acc=0.7829 val_loss=0.8480 val_auc=0.9372 val_acc=0.6912
+[run] metadata saved to /tmp/onetrans_out/run_metadata.json

@@ -1,0 +1,11 @@
+# OneTrans_NPU 精度三段（复跑于最终代码；golden = CPU fp32）
+# env: Ascend950DT_9582 / CANN9.1.0 / torch2.7.1+cpu / torch_npu2.7.1.post4
+
+[A] NPU fp32 vs CPU fp32 : max|Δ|=1.490e-07 cos=0.99999988 rel=3.429e-07
+[B] NPU bf16 vs CPU fp32 : max|Δ|=2.591e-03 cos=0.99998170 rel=5.431e-03
+/opt/buildtools/torch_v2_pt2.7.1/lib/python3.11/site-packages/torch/autograd/__init__.py:221: UserWarning: Cannot create tensor with interal format while allow_internel_format=False, tensor will be created with base format. (Triggered internally at ../torch_npu/csrc/aten/common/TensorFactories.cpp:340.)
+  torch.ones_like(out, memory_format=torch.preserve_format)
+[C] loss  CPU 1.594162→0.375242 | NPU 1.594162→0.375242 | Δloss=5.960e-08
+[C] acc   CPU 1.0000 | NPU 1.0000 | Δ=0.00 pp
+[verdict] A=True B=True C=True
+ACCURACY PASS

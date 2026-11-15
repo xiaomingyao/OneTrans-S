@@ -1,0 +1,6 @@
+[A] NPU fp32 vs CPU fp32 : max|Δ|=1.490e-07 cos=0.99999988 rel=3.429e-07
+[B] NPU bf16 vs CPU fp32 : max|Δ|=2.591e-03 cos=0.99998170 rel=5.431e-03
+[C] loss  CPU 1.594162→0.375242 | NPU 1.594162→0.375242 | Δloss=5.960e-08
+[C] acc   CPU 1.0000 | NPU 1.0000 | Δ=0.00 pp
+[verdict] A=True B=True C=True
+ACCURACY PASS

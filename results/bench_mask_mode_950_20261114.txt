@@ -1,0 +1,26 @@
+# mask 模式（float 加性 vs bool）在 950 上的端到端步时对照
+# env: Ascend950DT_9582 / CANN9.1.0 / torch2.7.1+cpu / torch_npu2.7.1.post4 / bf16 AMP
+# 配置: B=64 seq_len=64 d_model=128 heads=4 ns_len=4 multi=2 pyramid=3 mask=paper_causal, 20 iters/模式
+# 口径: 同一进程内两种模式的 p50 步时；每次 bench 自带 3 次 warmup
+# 采集: 2026-11-14
+
+[float] p50=55.2 ms  p90=55.7  min=53.8  loss=0.809698
+[bool ] p50=55.5 ms  p90=59.3  min=53.8  loss=0.809698
+[delta] bool vs float: -0.5%  (55.2 -> 55.5 ms)
+[loss]  float=0.809698 bool=0.809698 Δ=5.960e-08
+=== repeat 1 ===
+[float] p50=55.5 ms  p90=56.3  min=53.6  loss=0.809698
+[bool ] p50=54.8 ms  p90=55.8  min=53.5  loss=0.809698
+[delta] bool vs float: +1.1%  (55.5 -> 54.8 ms)
+[loss]  float=0.809698 bool=0.809698 Δ=5.960e-08
+=== repeat 2 ===
+[float] p50=56.5 ms  p90=57.1  min=55.0  loss=0.809698
+[bool ] p50=54.5 ms  p90=55.4  min=53.1  loss=0.809698
+[delta] bool vs float: +3.6%  (56.5 -> 54.5 ms)
+[loss]  float=0.809698 bool=0.809698 Δ=5.960e-08
+=== repeat 3 ===
+[float] p50=55.6 ms  p90=56.3  min=54.3  loss=0.809698
+[bool ] p50=53.3 ms  p90=54.3  min=51.7  loss=0.809698
+[delta] bool vs float: +4.0%  (55.6 -> 53.3 ms)
+[loss]  float=0.809698 bool=0.809698 Δ=5.960e-08
+ALLDONE

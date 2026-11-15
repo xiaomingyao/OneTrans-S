@@ -1,0 +1,155 @@
+# OneTrans_NPU 真 HF 数据集 + 2 die DDP（TAAC2026/data_sample_1000，1000 行；每卡 batch 32）
+# env: 2×Ascend950DT die / CANN9.1.0 / torch2.7.1+cpu / torch_npu2.7.1.post4 / bf16 AMP / torchrun --nproc_per_node=2
+# 采集: 2026-11-14, 容器 zeus-950-v2
+
+<frozen runpy>:128: RuntimeWarning: 'torch.distributed.run' found in sys.modules after import of package 'torch.distributed', but prior to execution of 'torch.distributed.run'; this may result in unpredictable behaviour
+[W1114 15:15:35.137652295 ProcessGroupHCCL.cpp:1145] Warning: The watchdog timeout 600000ms(which is set by init_process_group) is less than or equal to HCCL execution timeout 1836000ms! The plog may not be recorded. (function ProcessGroupHCCL)
+[env] {'device_type': 'npu', 'torch': '2.7.1+cpu', 'torch_npu': '2.7.1.post4', 'soc': 'Ascend950DT_9582'} dist=world_size=2 rank=0 local_rank=0
+[data] loading dataset via datasets.load_dataset: TAAC2026/data_sample_1000
+[data] loading dataset via datasets.load_dataset: TAAC2026/data_sample_1000
+[rank1]:[W1114 15:15:55.157985264 TensorFactories.cpp:340] Warning: Cannot create tensor with interal format while allow_internel_format=False, tensor will be created with base format. (function operator())
+[rank0]:[W1114 15:15:56.327385709 TensorFactories.cpp:340] Warning: Cannot create tensor with interal format while allow_internel_format=False, tensor will be created with base format. (function operator())
+[run] metadata
+{
+  "schema": "flat",
+  "scalar_cols": [
+    "item_id",
+    "item_int_feats_10",
+    "item_int_feats_12",
+    "item_int_feats_13",
+    "item_int_feats_16",
+    "item_int_feats_5",
+    "item_int_feats_6",
+    "item_int_feats_7",
+    "item_int_feats_8",
+    "item_int_feats_81",
+    "item_int_feats_83",
+    "item_int_feats_84",
+    "item_int_feats_85",
+    "item_int_feats_9",
+    "timestamp",
+    "user_id",
+    "user_int_feats_1",
+    "user_int_feats_100",
+    "user_int_feats_101",
+    "user_int_feats_102",
+    "user_int_feats_103",
+    "user_int_feats_104",
+    "user_int_feats_105",
+    "user_int_feats_106",
+    "user_int_feats_107",
+    "user_int_feats_108",
+    "user_int_feats_109",
+    "user_int_feats_3",
+    "user_int_feats_4",
+    "user_int_feats_48",
+    "user_int_feats_49",
+    "user_int_feats_50",
+    "user_int_feats_51",
+    "user_int_feats_52",
+    "user_int_feats_53",
+    "user_int_feats_54",
+    "user_int_feats_55",
+    "user_int_feats_56",
+    "user_int_feats_57",
+    "user_int_feats_58",
+    "user_int_feats_59",
+    "user_int_feats_82",
+    "user_int_feats_86",
+    "user_int_feats_92",
+    "user_int_feats_93",
+    "user_int_feats_94",
+    "user_int_feats_95",
+    "user_int_feats_96",
+    "user_int_feats_97",
+    "user_int_feats_98",
+    "user_int_feats_99"
+  ],
+  "array_cols": [
+    "item_int_feats_11",
+    "user_dense_feats_61",
+    "user_dense_feats_62",
+    "user_dense_feats_63",
+    "user_dense_feats_64",
+    "user_dense_feats_65",
+    "user_dense_feats_66",
+    "user_dense_feats_87",
+    "user_dense_feats_89",
+    "user_dense_feats_90",
+    "user_dense_feats_91",
+    "user_int_feats_15",
+    "user_int_feats_60",
+    "user_int_feats_62",
+    "user_int_feats_63",
+    "user_int_feats_64",
+    "user_int_feats_65",
+    "user_int_feats_66",
+    "user_int_feats_80",
+    "user_int_feats_89",
+    "user_int_feats_90",
+    "user_int_feats_91"
+  ],
+  "seq_cols": [
+    "domain_a_seq_38",
+    "domain_a_seq_39",
+    "domain_a_seq_40",
+    "domain_a_seq_41",
+    "domain_a_seq_42",
+    "domain_a_seq_43",
+    "domain_a_seq_44",
+    "domain_a_seq_45",
+    "domain_a_seq_46",
+    "domain_b_seq_67",
+    "domain_b_seq_68",
+    "domain_b_seq_69",
+    "domain_b_seq_70",
+    "domain_b_seq_71",
+    "domain_b_seq_72",
+    "domain_b_seq_73",
+    "domain_b_seq_74",
+    "domain_b_seq_75",
+    "domain_b_seq_76",
+    "domain_b_seq_77",
+    "domain_b_seq_78",
+    "domain_b_seq_79",
+    "domain_b_seq_88",
+    "domain_c_seq_27",
+    "domain_c_seq_28",
+    "domain_c_seq_29",
+    "domain_c_seq_30",
+    "domain_c_seq_31",
+    "domain_c_seq_32",
+    "domain_c_seq_33",
+    "domain_c_seq_34",
+    "domain_c_seq_35",
+    "domain_c_seq_36",
+    "domain_c_seq_37",
+    "domain_c_seq_47",
+    "domain_d_seq_17",
+    "domain_d_seq_18",
+    "domain_d_seq_19",
+    "domain_d_seq_20",
+    "domain_d_seq_21",
+    "domain_d_seq_22",
+    "domain_d_seq_23",
+    "domain_d_seq_24",
+    "domain_d_seq_25",
+    "domain_d_seq_26"
+  ],
+  "label_mapping": {
+    "1": 0,
+    "2": 1
+  },
+  "non_seq_dim": 183,
+  "seq_feature_dim": 45,
+  "seq_len": 32
+}
+[run] device=npu:0 samples=1000 train=400 val=200
+[run] non_seq=(1000, 183) seq=(1000, 32, 45) classes=2
+[run] amp=True amp_dtype=bf16 grad_scaler=False device_type=npu mask_type=paper_causal pyramid_layers=3 pyramid_align=32 sep_token=True activation_checkpoint=False world_size=2 per_rank_batch=32
+[epoch 01] train_loss=0.3987 train_auc=0.5238 train_acc=0.8625 val_loss=0.4394 val_auc=0.4922 val_acc=0.8500
+[perf] epoch=01 wall=1.663s steps=13 step_ms=127.9 global_samples_per_s=500.2 world_size=2
+[epoch 02] train_loss=0.3830 train_auc=0.5152 train_acc=0.8725 val_loss=0.4227 val_auc=0.4610 val_acc=0.8500
+[perf] epoch=02 wall=1.288s steps=13 step_ms=99.1 global_samples_per_s=646.0 world_size=2
+[run] metadata saved to /tmp/otr_real2/run_metadata.json
+[perf] steady_epoch_wall_s=1.288 n=1 world_size=2
