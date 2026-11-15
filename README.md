@@ -63,17 +63,16 @@ git -C GPU_Reference status --porcelain # 空 = 未被改动
 | 精度 C：10 步训练轨迹 | `Δloss = 5.960e-08`、`Δacc = 0.00 pp` | 同上 |
 | 结构 + 数值对照（logits/loss/梯度） | 键名键序一致、参数 `max\|Δ\| = 0`；logits `1.788e-07`、loss `5.960e-08`、梯度 `rel_max = 1.205e-06`（n=747，2 个数值零梯度，阈值 1e-8）；bf16 为 `2.313e-03 / 2.797e-04 / 1.817e-02` | `results/compare_gpu_vs_npu_950_20261114.txt` |
 | AMP 划算性（同进程交替 3 轮×10 步取中位） | fp32 **54.3 ms / 109 MiB** vs bf16 **69.3 ms / 99 MiB** ⇒ 步时比 **1.275**（bf16 慢 **27.5%**），HBM 省 9.2% | `results/amp_bench_fp32_vs_bf16_950_20261114.txt` |
-| 多卡扩展（每 rank 本地 batch 64，synthetic 16,384 行，3 epoch） | 稳态 **867.6 / 1,294.1 / 2,220.4 / 3,799.7** samples/s（1/2/4/8 die）⇒ **1.00 / 1.49 / 2.56 / 4.38×**，效率 74.6% / 64.0% / 54.8% | `results/scaling_ddp_950_20261114.txt` |
+| 多卡扩展（真实数据集 `data_sample_1000`，每 rank 本地 batch 64，8 epoch，稳态 n=7） | 1/2/4/8 die = **848.4 / 1,303.5 / 2,367.8 / 3,755.6** samples/s ⇒ **1.00 / 1.54 / 2.79 / 4.43×**，效率 76.8% / 69.8% / 55.3% | `results/scaling_real_data_950_20261114.txt` |
 | mask 形态（kernel 级，3 次 attention 调用合计） | float 加性 **45 kernel / 139.0 µs**；bool **6 kernel / 36.9 µs**（`FlashAttentionScoreV4`×3 + `LogicalNot`×3）；单次 **46.3 µs vs 12.3 µs = 3.77×** | `results/kd_float_mask.csv`、`kd_bool_mask.csv`、`kd_none.csv`（无 mask 3 kernel / 28.0 µs） |
 | mask 形态（模型级，B64/S64，4 次重复） | `−0.5% / +1.1% / +3.6% / +4.0%`，中位 **+2.4%**——收益在噪声边缘 | `results/bench_mask_mode_950_20261114.txt` |
-| 端到端训练（合成数据 2 epoch） | val AUC 0.8787 → **0.9372**，val acc 0.5833 → 0.6912 | `results/train_synthetic_950_20261114.txt` |
-| 真实 HF 数据链路 | `TAAC2026/data_sample_1000`（1,000 行）2 epoch、13 步/epoch、**78.9 ms/步 / 811.2 samples/s**；val AUC 0.5429（样本极小，**不代表任务精度**） | `results/train_hf_real_950_20261114.txt`（2 卡：`..._2card_...`，99.1 ms/步、646.0 sps） |
+| 端到端训练（真实数据 `TAAC2026/data_sample_1000`，1,000 行，2 epoch） | 单 die：13 步/epoch、**78.9 ms/步 / 811.2 samples/s**、val AUC 0.5429；2 die：13 步/epoch、**99.1 ms/步 / 646.0 samples/s**、val AUC 0.4610（样本极小，**不代表任务精度**，只证明能训且指标产出） | `results/train_hf_real_950_20261114.txt`、`results/train_hf_real_2card_950_20261114.txt` |
 
 **三条结论**：
 
 1. **迁移正确性可证**：模型零改动前提下，fp32 误差 1.5e-7 量级、bf16 2.6e-3 量级、10 步训练 loss 差 6e-8。
 2. **不要把 kernel 加速比当收益**：bool mask kernel 级 3.77×，端到端中位只有 +2.4%；AMP 在本模型是负收益（步时 +27.5%）。
-3. **多卡按生产口径接线**：循环内不做集合通信；1→8 die 扩展比 4.38×（效率 54.8%），口径绑定「每卡本地 batch 64」，换口径不可比。
+3. **多卡按生产口径接线**：循环内不做集合通信；1→8 die 扩展比 4.43×（效率 55.3%），口径绑定「每卡本地 batch 64」，换口径不可比。
 
 ## 4. 复刻命令
 
