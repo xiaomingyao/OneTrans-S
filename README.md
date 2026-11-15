@@ -47,18 +47,27 @@ git -C GPU_Reference rev-parse HEAD        # 8febd7e…；status --porcelain 为
 
 ## 3. 测试验证
 
+### 3.1 精度验证（NPU 输出 vs CPU fp32 golden）
+
+| 用例 | 判据 | 实测 |
+|---|---|---|
+| A：NPU **fp32** 前向 vs CPU fp32 golden | `max|Δ| ≤ 1e-4` 且 `cos ≥ 0.99999` | `max|Δ| = 1.490e-07`、`cos = 0.99999988`、`rel = 3.43e-07` |
+| B：NPU **bf16** 前向（autocast）vs CPU fp32 golden | `max|Δ| ≤ 2e-2` 且 `cos ≥ 0.9995` | `max|Δ| = 2.591e-03`、`cos = 0.99998170`、`rel = 5.43e-03` |
+| C：10 步训练轨迹（loss / acc 逐步比对） | `Δloss ≤ 1e-2` | `Δloss = 5.960e-08`、`Δacc = 0.00 pp` |
+
+日志：`results/accuracy_950_20261114_final.txt`
+
+### 3.2 功能、性能与多卡
+
 | 项 | 结果 | 日志 |
 |---|---|---|
-| 精度（NPU vs CPU fp32） | fp32 `max|Δ|=1.490e-07` / cos `0.99999988`；bf16 `2.591e-03` / `0.99998170`；10 步 Δloss `5.96e-08` | `results/accuracy_950_20261114_final.txt` |
-| 与参考实现对照 | 参数 `max|Δ|=0`；logits `1.788e-07`、loss `5.960e-08`、747 个梯度 `rel_max=1.205e-06` | `results/compare_gpu_vs_npu_950_20261114.txt` |
-| 冒烟 / 单卡步时 | PASS；首步 ~610–645 ms（编译预热）→ 稳态 **75–78 ms** | `results/smoke_950_20261114_final.txt` |
-| AMP 划算性 | fp32 **54.3 ms** vs bf16 **69.3 ms**（比 1.275，慢 27.5%），HBM 只省 9.2% ⇒ **默认关** | `results/amp_bench_fp32_vs_bf16_950_20261114.txt` |
-| mask 形态 | kernel 级 float 139.0 µs / bool 36.9 µs（**3.77×**）；端到端中位仅 **+2.4%** | `results/kd_*.csv`、`results/bench_mask_mode_950_20261114.txt` |
-| 多卡扩展（每 rank batch 64） | 1/2/4/8 die 稳态 **829.5 / 1,303.6 / 2,348.3 / 3,686.2** samples/s = **1.00/1.57/2.83/4.44×** | `results/scaling_real_data_950_20261114.txt` |
-| DDP 梯度等价 | `worst rel|Δg| = 1.211e-06`（门槛 1e-5）、`Δloss = 0` | `results/verify_950_20261115_rerun.txt` |
-| 端到端训练（真实数据） | 1,000 行 2 epoch：78.9 ms/步、811.2 samples/s（样本极小，不代表任务精度） | `results/train_hf_real_950_20261114.txt` |
+| 冒烟（前向 + 反向 + 3 步优化） | **PASS**；首步 ~610–645 ms（编译预热）→ 稳态 **76.9 / 77.3 ms** | `results/smoke_950_20261114_final.txt` |
+| mask 形态（kernel 级） | float 加性 139.0 µs / 45 kernel → bool 36.9 µs / 6 kernel（`FlashAttentionScoreV4`），**3.77×**；端到端中位 **+2.4%** | `results/kd_*.csv`、`results/bench_mask_mode_950_20261114.txt` |
+| 多卡扩展（每 rank 本地 batch 64） | 1/2/4/8 die 稳态 **829.5 / 1,303.6 / 2,348.3 / 3,686.2** samples/s = **1.00 / 1.57 / 2.83 / 4.44×**（效率 78.6% / 70.8% / 55.5%） | `results/scaling_real_data_950_20261114.txt` |
+| DDP 梯度等价 | **PASS — 等价**：2 die DDP 与单进程同全局 batch 的梯度 `worst rel|Δg| = 1.211e-06`（门槛 1e-5），loss 差 `Δ = 0.000e+00` | `results/verify_950_20261115_rerun.txt` |
+| 端到端训练（真实数据） | 1,000 行 2 epoch 跑通：单 die 13 步/epoch、**78.9 ms/步 / 811.2 samples/s**、val AUC 0.5429；2 die **99.1 ms/步 / 646.0 samples/s**（样本极小，不代表任务精度） | `results/train_hf_real_950_20261114.txt`、`results/train_hf_real_2card_950_20261114.txt` |
 
-口径：kernel 级加速比 ≠ 端到端收益；本模型 AMP 是负收益；多卡数字绑定「每卡本地 batch」，换口径不可比。2026-11-15 的逐条复跑记录见 `results/verify_950_20261115_rerun.txt`。
+口径：kernel 级加速比 ≠ 端到端收益；多卡数字绑定「每卡本地 batch」，换口径不可比。2026-11-15 的逐条复跑记录见 `results/verify_950_20261115_rerun.txt`。
 
 ## 4. 快速开始
 
