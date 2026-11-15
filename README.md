@@ -68,11 +68,11 @@ git -C GPU_Reference rev-parse HEAD        # 8febd7e…；status --porcelain 为
 
 ### 3.1 精度验证（NPU 输出 vs CPU fp32 golden）
 
-| 用例 | 判据 | 实测 |
-|---|---|---|
-| A：NPU **fp32** 前向 vs CPU fp32 golden | `max|Δ| ≤ 1e-4` 且 `cos ≥ 0.99999` | `max|Δ| = 1.490e-07`、`cos = 0.99999988`、`rel = 3.43e-07` |
-| B：NPU **bf16** 前向（autocast）vs CPU fp32 golden | `max|Δ| ≤ 2e-2` 且 `cos ≥ 0.9995` | `max|Δ| = 2.591e-03`、`cos = 0.99998170`、`rel = 5.43e-03` |
-| C：10 步训练轨迹（loss / acc 逐步比对） | `Δloss ≤ 1e-2` | `Δloss = 5.960e-08`、`Δacc = 0.00 pp` |
+| 用例 | 判据 | 实测 | 结果 |
+|---|---|---|---|
+| A：NPU **fp32** 前向 vs CPU fp32 golden | `max|Δ| ≤ 1e-4` 且 `cos ≥ 0.99999` | `max|Δ| = 1.490e-07`、`cos = 0.99999988`、`rel = 3.43e-07` | **PASS**（max|Δ| 余量 671×，cos 0.99999988） |
+| B：NPU **bf16** 前向（autocast）vs CPU fp32 golden | `max|Δ| ≤ 2e-2` 且 `cos ≥ 0.9995` | `max|Δ| = 2.591e-03`、`cos = 0.99998170`、`rel = 5.43e-03` | **PASS**（余量约 8×） |
+| C：10 步训练轨迹（loss / acc 逐步比对） | `Δloss ≤ 1e-2` 且 `Δacc ≤ 2 pp` | `Δloss = 5.960e-08`、`Δacc = 0.00 pp` | **PASS**（余量 5 个数量级） |
 
 指标含义：
 
