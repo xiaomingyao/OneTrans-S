@@ -17,32 +17,35 @@ git -C GPU_Reference rev-parse HEAD        # 8febd7e…；status --porcelain 为
 | 目录 | 内容 |
 |---|---|
 | `GPU_Reference/` | submodule → 上游原仓 @ `8febd7e`（零改动，diff 与数值对照的基准） |
-| `OneTrans_NPU/` | 移植实现：`npu_compat.py`（兼容层，160 行）+ `main_pytorch.py`（+9 行）+ `scripts/run_taac2026_sample.py` + `tests/`（13 个探针） |
+| `OneTrans_NPU/` | 移植实现：`npu_compat.py`（兼容层）+ `main_pytorch.py` + `scripts/run_taac2026_sample.py` + `tests/`（探针） |
 | `docs/` | `GPU_VS_NPU_CODE_IMPLEMENTATION.md`（代码实现对比）· `MIGRATION.md`（五阶段迁移对照） |
-| `patches/` | `npu_changes.diff`（完整改动，458 行） |
+| `patches/` | `npu_changes.diff`（完整改动） |
 | `results/` | 各类实测日志（§3 每行标了对应文件） |
 | `tools/` | 文档与配图生成器 |
 
-### 1.1 环境（Ascend 950DT）
+**验证环境**：`Ascend950DT` V120（板卡 `IT23HMDB_D2`，NPU `9582`）单机 8 die、单 die HBM 96 GiB；CANN toolkit **9.1.0** + 宿主机驱动/固件 **25.1.rc2**（Firmware `7.0.9.100.203`）；镜像 `zeus-950-v2-snap:20261102`（Ubuntu 22.04.5 / glibc 2.35）；Python 3.11.0 + **torch 2.7.1+cpu** + **torch_npu 2.7.1.post4**（`/opt/buildtools/torch_v2_pt2.7.1`）；真实数据链路另需 `datasets` 5.2.0 / `huggingface_hub` 2.4.0 / `pyarrow` 26.0.1。
 
-| 项 | 值 |
-|---|---|
-| SoC / 规模 | `Ascend950DT` V120（板卡 `IT23HMDB_D2`，NPU `9582`）/ 8 die，单 die HBM 96 GiB |
-| CANN / 驱动 | toolkit **9.1.0**；宿主机驱动+固件 **25.1.rc2**（Firmware `7.0.9.100.203`） |
-| 镜像 / OS | `zeus-950-v2-snap:20261102` / Ubuntu 22.04.5（glibc 2.35） |
-| Python / PyTorch | 3.11.0 / **2.7.1+cpu** + **torch_npu 2.7.1.post4**（`/opt/buildtools/torch_v2_pt2.7.1`） |
-| 真实数据可选栈 | `datasets` 5.2.0 · `huggingface_hub` 2.4.0 · `pyarrow` 26.0.1 |
+判据：运行首行必须打印 `{'torch': '2.7.1+cpu', 'torch_npu': '2.7.1.post4', 'soc': 'Ascend950DT_9582'}`，对不上就不能与本仓数字对比；950 上 AMP 只放行 bf16。
 
-判据：运行首行必须打印 `{'torch': '2.7.1+cpu', 'torch_npu': '2.7.1.post4', 'soc': 'Ascend950DT_9582'}`，对不上就不能与 `results/` 对比；950 上 AMP 只放行 bf16。
+## 2. 从 GPU 迁移到 NPU：关键修改
 
-## 2. 改动与文档
+改动集中在「接线层」，模型定义与数据管道**零改动**：触碰上游 2 个文件 **147 行**（`main_pytorch.py` +9/−0、`scripts/run_taac2026_sample.py` +104/−34，占 1,233 行活跃 Python 的 11.9%），另新增兼容层 `npu_compat.py` 160 行；`models/*`、`utils/*` **0 行**。
 
-- **改动面**：触碰上游 2 个文件 **147 行**（`main_pytorch.py` +9/−0、`scripts/run_taac2026_sample.py` +104/−34，占 1,233 行活跃 Python 的 11.9%），另新增兼容层 `npu_compat.py` 160 行；`models/*`、`utils/*` **0 行**。
-- **改了什么、为什么、判据** → [`docs/GPU_VS_NPU_CODE_IMPLEMENTATION.md`](docs/GPU_VS_NPU_CODE_IMPLEMENTATION.md)：按「设备 / 精度能力门 / 集合通信 / kernel 落点 / 收尾 / 计时」逐项给「改前 vs 改后 + 判据」。
-- **按五阶段看 GPU 与 NPU 并排实现** → [`docs/MIGRATION.md`](docs/MIGRATION.md)。
-- **逐行 diff** → [`patches/npu_changes.diff`](patches/npu_changes.diff)：对上游副本 `patch -p1` 可精确复原 `OneTrans_NPU/`。
+| # | 关键修改 | 为什么这么改 |
+|---|---|---|
+| 1 | 平台差异收敛到 `npu_compat.py` 一个文件（设备初始化 / AMP 能力门 / no-op scaler / autocast / 分布式 / 收尾） | 其余代码只调这层接口，`models`、`utils` 才能保持 0 行；换机型只改一个文件 |
+| 2 | 新增 `ONETRANS_ATTN_MASK=float\|bool` 开关，默认 float（与上游逐字等价） | 950 上 float 加性 mask 使 SDPA 退回 Cast+Muls+BatchMatMul+Softmax 手工路径（45 kernel / 139 µs）；bool mask 才落 `FlashAttentionScoreV4`（6 kernel / 36.9 µs） |
+| 3 | `should_enable_amp()` 在 NPU 只放行 bf16，GradScaler 用 no-op | 平台 autocast 默认 dtype 是 fp16 而非 bf16；且本模型 bf16 实测慢 27.5%，默认关闭 |
+| 4 | HCCL + `device_ids=[local_rank]` + `broadcast_buffers=False` + `find_unused_parameters=True`；训练集按 rank 切分、验证只在 rank0 跑全量，**循环内不做跨卡归约** | epoch 末 `all_gather` + `.cpu()` 实测会卡在 D2H；AUC/acc 本来不需要集合通信 |
+| 5 | 计时加 `torch.npu.synchronize()`；收尾 `shutdown()` + `os._exit(0)` | 不同步的计时偏小；平台 teardown 抖动会被误报成任务失败 |
 
-## 3. 关键结论
+细节（每项的「改前 vs 改后 + 判据」）：
+
+- 逐项说明 → [`docs/GPU_VS_NPU_CODE_IMPLEMENTATION.md`](docs/GPU_VS_NPU_CODE_IMPLEMENTATION.md)
+- 按五阶段并排对照（GPU 左 / NPU 右，标出哪段零改动） → [`docs/MIGRATION.md`](docs/MIGRATION.md)
+- 逐行 diff → [`patches/npu_changes.diff`](patches/npu_changes.diff)（对上游副本 `patch -p1` 可精确复原 `OneTrans_NPU/`）
+
+## 3. 测试验证
 
 | 项 | 结果 | 日志 |
 |---|---|---|
@@ -77,10 +80,4 @@ HF_ENDPOINT=https://hf-mirror.com python OneTrans_NPU/scripts/run_taac2026_sampl
 
 多卡（DDP/HCCL 扩展性）、mask 与 AMP 单项 A/B、HCCL dtype 探针、一键批量脚本的完整命令与判据 → [`docs/MIGRATION.md`](docs/MIGRATION.md) §6.4「固化：一条命令跑完五阶段」；各探针用途见 `OneTrans_NPU/tests/`。
 
-两个 `run_*.sh` 是本机 ssh + docker 封装（含 `<工号>` 占位路径），换机器需改顶部 5 个变量；本机直跑用上面 4 条即可，无宿主路径假设。
-
-## 5. 边界
-
-- 不含 checkpoint、profiling 原始目录、数据集本体；仓库为 private，内部标识已脱敏。
-- 未验证：FP8、H20 侧对照（本机无 GPU）、16 卡以上拓扑、真实业务数据集的效果验收。
-- 数字来自上表环境，换机型或换 CANN/torch 版本需重测，不可外推。
+两个 `run_*.sh` 是本机 ssh + docker 封装（含 `<工号>` 占位路径），换机器需改顶部 5 个变量；本机直跑用上面 4 条即可。
