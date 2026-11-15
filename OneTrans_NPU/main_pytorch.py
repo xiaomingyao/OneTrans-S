@@ -5,7 +5,7 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 # [NPU] 可选：把"0 / -inf"型加性 mask 换成 bool mask。
-# 950 实测（见 docs/ADAPT_REPORT 与 patches/npu_changes.diff）：float 加性 mask 会让 SDPA 退回 Cast+Muls+BatchMatMul+Softmax
+# 950 实测（见 docs/GPU_VS_NPU_CODE_IMPLEMENTATION.md 与 patches/npu_changes.diff）：float 加性 mask 会让 SDPA 退回 Cast+Muls+BatchMatMul+Softmax
 # 手工路径；bool mask 才落 FlashAttentionScoreV4。默认 float，保持与参考实现逐字等价。
 _MASK_DTYPE = os.environ.get("ONETRANS_ATTN_MASK", "float").lower()
 

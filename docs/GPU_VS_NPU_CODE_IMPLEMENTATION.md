@@ -1,4 +1,4 @@
-# OneTrans 参考实现 → 昇腾 950：硬件相关代码改动报告
+# GPU 与 NPU 代码实现对比（OneTrans 参考实现 → 昇腾 950）
 
 项目：`/root/bytedance-onetrans/`　版本：v3（本次仅改呈现：代码块语法高亮）　日期：2026-11-14
 参考实现：`https://github.com/WestbrookLong/OneTrans_Pytorch`，commit **8febd7e**（零改动）

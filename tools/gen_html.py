@@ -65,8 +65,8 @@ def highlight_code(html_body: str) -> str:
                   _one, html_body, flags=re.S)
 
 ROOT = "/root/bytedance-onetrans"
-SRC = sys.argv[1] if len(sys.argv) > 1 else "docs/ADAPT_REPORT_bytedance_onetrans_v3_20261114.md"
-OUT = sys.argv[2] if len(sys.argv) > 2 else "docs/ADAPT_REPORT_bytedance_onetrans_v3_20261114.html"
+SRC = sys.argv[1] if len(sys.argv) > 1 else "docs/GPU_VS_NPU_CODE_IMPLEMENTATION.md"
+OUT = sys.argv[2] if len(sys.argv) > 2 else "docs/GPU_VS_NPU_CODE_IMPLEMENTATION.html"
 TITLE = sys.argv[3] if len(sys.argv) > 3 else "OneTrans 迁移昇腾 950 指导 · 2026-11-14"
 
 CSS = """
