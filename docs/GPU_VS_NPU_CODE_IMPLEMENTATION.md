@@ -3,7 +3,7 @@
 项目：`/root/bytedance-onetrans/`　版本：v3（本次仅改呈现：代码块语法高亮）　日期：2026-11-14
 参考实现：`https://github.com/WestbrookLong/OneTrans_Pytorch`，commit **8febd7e**（零改动）
 迁移实现：`OneTrans_NPU/`　环境：容器 `zeus-950-v2`（`zeus-950-v2-snap:20261102`）、CANN 9.1.0、torch 2.7.1+cpu / torch_npu 2.7.1.post4
-逐行原文：`patches/npu_changes.diff`（299 行）
+逐行原文：`patches/npu_changes.diff`（458 行；含 `npu_compat.py` 新增文件全文）
 
 > v2 相对 v1：① **删除合成数据集入口**，数据路径与 GPU 侧完全一致（HF `TAAC2026/data_sample_1000` / 本地 parquet）；② **HF 延迟导入回退**（栈已装好，不再需要改数据代码）；③ 调试打印删除；④ 本报告**只列与硬件相关的改动**，非硬件改动一律回退为参考实现。
 
