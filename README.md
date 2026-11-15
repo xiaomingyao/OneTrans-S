@@ -26,7 +26,38 @@ git -C GPU_Reference status --porcelain # 空 = 未被改动
 | `tools/` | 文档与配图生成器（`gen_html.py` / `gen_html_pair.py` / `gen_fig_mask_cost.py` / `build_merged_v3.py`） |
 | `results/` | 全部实测日志（冒烟 / 精度三段 / AMP / mask / DDP / 真实数据 / 合成数据） |
 
-**验证环境**：Ascend 950DT 单机 8 die；CANN 9.x；Python 3.11；torch 2.7.1+cpu、torch_npu 2.7.1.post4。
+### 1.1 昇腾 CANN 与软件版本
+
+本次所有数字都在**下面这一套环境**里测的，换机型 / 换 CANN 或 torch 版本都要重测，不可外推。
+
+**硬件**
+
+| 项 | 值 |
+|---|---|
+| SoC | `Ascend950DT`（Chip Version `V120`，板卡 `IT23HMDB_D2`，NPU Name `9582`） |
+| 单机 die 数 | 8（`npu-smi info -l` → Total Count = 8；本仓不跨机） |
+| 单 die HBM | 98,304 MB（96 GiB），HBM Clock 4000 MHz |
+
+**软件栈**
+
+| 项 | 版本 |
+|---|---|
+| CANN toolkit | **9.1.0**（`/usr/local/Ascend/ascend-toolkit/latest/…/ascend_toolkit_install.info`） |
+| 驱动 / 固件（宿主机） | **25.1.rc2**（Firmware `7.0.9.100.203`，`npu-smi` 同为 25.1.rc2） |
+| 容器镜像 | `zeus-950-v2-snap:20261102` |
+| OS / glibc | Ubuntu 22.04.5 LTS / glibc 2.35 |
+| Python | 3.11.0（`/opt/buildtools/torch_v2_pt2.7.1/bin/python`） |
+| PyTorch | **2.7.1+cpu**（CPU 版 ABI，配 torch_npu 使用） |
+| torch_npu | **2.7.1.post4** |
+| NumPy | 2.4.6 |
+| 真实数据链路的 HF 栈（可选） | `datasets` 5.2.0 · `huggingface_hub` 2.4.0 · `pyarrow` 26.0.1 |
+| 集合通信 | HCCL（`dist.init_process_group("hccl")`，torch_npu 自带） |
+
+**三条与环境相关的判据**
+
+1. **环境指纹必须打印**：每次运行第一行都应包含 `{'torch': '2.7.1+cpu', 'torch_npu': '2.7.1.post4', 'soc': 'Ascend950DT_9582'}`；对不上就说明跑在别的栈上，数字不可与 `results/` 对比。
+2. **精度能力门与机型绑定**：950 上 AMP 只放行 `bf16`（`fp16` 被 `should_enable_amp` 拦下）；FP8 本仓未使用，且 950 没有 `e4m3/e5m2` 的直调入口（低精度走 int8 + antiquant）。
+3. **两套 Python 别混用**：`/opt/buildtools/torch_v2_pt2.7.1`（3.11.0 + torch 2.7.1 + torch_npu 2.7.1.post4）是训练栈；系统 `/usr/local/python3.12.13`（3.12.13 + torch 2.10.0+cpu，无 torch_npu）仅供临时脚本，混用会出现 ABI / kernel 差异。
 
 ## 2. 工程结构与模块说明
 
