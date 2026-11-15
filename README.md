@@ -74,6 +74,14 @@ git -C GPU_Reference rev-parse HEAD        # 8febd7e…；status --porcelain 为
 | B：NPU **bf16** 前向（autocast）vs CPU fp32 golden | `max|Δ| ≤ 2e-2` 且 `cos ≥ 0.9995` | `max|Δ| = 2.591e-03`、`cos = 0.99998170`、`rel = 5.43e-03` |
 | C：10 步训练轨迹（loss / acc 逐步比对） | `Δloss ≤ 1e-2` | `Δloss = 5.960e-08`、`Δacc = 0.00 pp` |
 
+指标含义：
+
+- `max|Δ|`：把 NPU 输出与 CPU golden 逐元素相减，取绝对值的**最大值**（最大绝对误差，单位同输出量纲）。
+- `rel`：`mean(|Δ|) / mean(|golden|)`，平均绝对误差相对 golden 平均幅值的比例。
+- `cos`：两输出展平后的余弦相似度，1 表示方向完全一致。
+
+**验收结论：OK —— 三段判据全部满足**（脚本 `[verdict] A=True B=True C=True` → `ACCURACY PASS`）：fp32 最大绝对误差 `1.5e-07`（判据 1e-4）、bf16 `2.6e-03`（判据 2e-2），余弦相似度 `≥0.99998`（判据 0.9995/0.99999），10 步训练的 loss 差 `6e-08`、accuracy 差 `0.00 pp`。
+
 日志：`results/accuracy_950_20261114_final.txt`
 
 ### 3.2 功能、性能与多卡
