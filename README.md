@@ -2,14 +2,20 @@
 
 ByteDance **OneTrans**（TAAC2026 推荐模型）参考实现 → 昇腾 **950DT** 的移植工程、验证脚本与交付文档。
 
-原始仓库以 `GPU_Reference/` 形式保留（**零改动**），移植实现全部在 `OneTrans_NPU/`。
-上游 commit：`8febd7eff9b1f2f63fe1fa4e364af8a8755f51fb`（见 `REFERENCE_COMMIT.txt`）。
+参考实现**不 vendored**，以 git submodule 指向原仓并锁定 commit（零改动）；移植实现全部在 `OneTrans_NPU/`。
+
+```bash
+git clone --recurse-submodules https://github.com/xiaomingyao/onetrans-d
+# 已 clone 过：git submodule update --init GPU_Reference
+```
+
+上游：`https://github.com/WestbrookLong/OneTrans_Pytorch` @ `8febd7eff9b1f2f63fe1fa4e364af8a8755f51fb`（见 `REFERENCE_COMMIT.txt` / `.gitmodules`）。
 
 ## 目录
 
 | 目录 | 内容 |
 |---|---|
-| `GPU_Reference/` | 上游参考实现（未改一行，用于 diff 与数值对照） |
+| `GPU_Reference/` | **submodule** → `WestbrookLong/OneTrans_Pytorch` @ `8febd7e`（未改一行，用于 diff 与数值对照） |
 | `OneTrans_NPU/` | 移植实现：`npu_compat.py`（设备/AMP/scaler/分布式收尾）+ 装配脚本 + `tests/` 探针 |
 | `docs/` | 迁移指导 v1–v4、适配报告 v1–v3、按阶段并排实现（GPU \| NPU）、`npu_changes.diff`、出图脚本 |
 | `results/` | 全部实测日志（冒烟 / 精度三段 / AMP / mask / DDP 扩展 / 真实数据 / 合成数据） |

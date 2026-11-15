@@ -1,1 +1,13 @@
-8febd7eff9b1f2f63fe1fa4e364af8a8755f51fb
+# 上游参考实现：以 git submodule 引用，不 vendored（零改动）
+repo:   https://github.com/WestbrookLong/OneTrans_Pytorch
+commit: 8febd7eff9b1f2f63fe1fa4e364af8a8755f51fb
+date:   2026-04-24 (fix issue)
+
+# 获取
+git submodule update --init GPU_Reference
+
+# 校验：应输出上面的 commit
+git -C GPU_Reference rev-parse HEAD
+
+# 校验零改动：输出为空
+git -C GPU_Reference status --porcelain

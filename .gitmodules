@@ -1,0 +1,3 @@
+[submodule "GPU_Reference"]
+	path = GPU_Reference
+	url = https://github.com/WestbrookLong/OneTrans_Pytorch
