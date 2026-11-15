@@ -341,9 +341,9 @@ def autocast_context(device_type: str, amp_dtype: torch.dtype, use_amp: bool):
 
 | 档位 | 步时中位 | 峰值 HBM 增量 |
 |---|---:|---:|
-| fp32 | **56.0 ms** | 109 MiB |
-| bf16 | **69.0 ms** | 99 MiB |
-| 比值 | **1.232（bf16 慢 23.2%）** | −9.2% |
+| fp32 | **54.3 ms** | 109 MiB |
+| bf16 | **69.3 ms** | 99 MiB |
+| 比值 | **1.275（bf16 慢 27.5%）** | −9.2% |
 
 原因：6M 参数全是小 GEMM（每 token 组一套 KQV/FFN），bf16 无法摊薄精度转换与 cast 开销；显存只省 10 MiB。**结论：本模型默认关 AMP**，`--amp` 只在更大规模或 HBM 紧张时开。
 
