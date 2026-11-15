@@ -12,7 +12,11 @@ git clone --recurse-submodules https://github.com/xiaomingyao/onetrans-d
 git -C GPU_Reference rev-parse HEAD        # 8febd7e…；status --porcelain 为空 = 未改动
 ```
 
-本仓把这份 GPU 代码迁到 950DT，并证明迁移是对的：冒烟、三段精度对齐、与参考实现的代码/结构/数值对照、AMP 划算性、DDP 梯度等价与扩展性。
+本仓做的事：
+
+1. **迁移**：把这份 GPU 代码迁到 950DT，改动只在接线层（见 §2）。
+2. **取证**：冒烟、三段精度、DDP 梯度等价、1–8 die 扩展性，全部留可复跑探针与日志（见 §3）。
+3. **复现**：4 条命令重跑核心结论（见 §4），逐项细节见 `docs/`。
 
 | 目录 | 内容 |
 |---|---|
@@ -23,11 +27,26 @@ git -C GPU_Reference rev-parse HEAD        # 8febd7e…；status --porcelain 为
 | `results/` | 各类实测日志（§3 每行标了对应文件） |
 | `tools/` | 文档与配图生成器 |
 
-**验证环境**：`Ascend950DT` V120（板卡 `IT23HMDB_D2`，NPU `9582`）单机 8 die、单 die HBM 96 GiB；CANN toolkit **9.1.0** + 宿主机驱动/固件 **25.1.rc2**（Firmware `7.0.9.100.203`）；镜像 `zeus-950-v2-snap:20261102`（Ubuntu 22.04.5 / glibc 2.35）；Python 3.11.0 + **torch 2.7.1+cpu** + **torch_npu 2.7.1.post4**（`/opt/buildtools/torch_v2_pt2.7.1`）；真实数据链路另需 `datasets` 5.2.0 / `huggingface_hub` 2.4.0 / `pyarrow` 26.0.1。
+### 1.1 验证环境
 
-判据：运行首行必须打印 `{'torch': '2.7.1+cpu', 'torch_npu': '2.7.1.post4', 'soc': 'Ascend950DT_9582'}`，对不上就不能与本仓数字对比；950 上 AMP 只放行 bf16。
+| 项 | 值 |
+|---|---|
+| SoC | `Ascend950DT` V120（板卡 `IT23HMDB_D2`，NPU Name `9582`） |
+| 规模 | 单机 8 die；单 die HBM 96 GiB |
+| CANN | toolkit **9.1.0** |
+| 驱动 / 固件 | 宿主机 **25.1.rc2**（Firmware `7.0.9.100.203`） |
+| 镜像 / OS | `zeus-950-v2-snap:20261102` / Ubuntu 22.04.5（glibc 2.35） |
+| Python | 3.11.0（`/opt/buildtools/torch_v2_pt2.7.1`） |
+| PyTorch | **2.7.1+cpu** + **torch_npu 2.7.1.post4** |
+| 真实数据可选栈 | `datasets` 5.2.0 · `huggingface_hub` 2.4.0 · `pyarrow` 26.0.1 |
 
-## 2. 从 GPU 迁移到 NPU：几点关键修改说明
+环境判据：
+
+1. 运行首行必须打印 `{'torch': '2.7.1+cpu', 'torch_npu': '2.7.1.post4', 'soc': 'Ascend950DT_9582'}`，对不上不能与本仓数字对比。
+2. 950 上 AMP 只放行 bf16（平台 autocast 默认 dtype 是 fp16；本仓按实测只用 bf16），FP8 无直调入口。
+3. 数字绑定本表环境，换机型或换 CANN / torch 版本需重测。
+
+## 2. 从 GPU 迁移到 NPU
 
 改动集中在「接线层」，模型定义与数据管道**零改动**：触碰上游 2 个文件 **147 行**（`main_pytorch.py` +9/−0、`scripts/run_taac2026_sample.py` +104/−34，占 1,233 行活跃 Python 的 11.9%），另新增兼容层 `npu_compat.py` 160 行；`models/*`、`utils/*` **0 行**。
 
