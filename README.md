@@ -66,40 +66,40 @@ git -C GPU_Reference rev-parse HEAD        # 8febd7e…；status --porcelain 为
 
 ## 3. 测试验证
 
+两表统一为「项 / 判据 / 实测 / 结果 / 日志」五列；日志列的路径均在 `results/` 下。
+
 ### 3.1 精度验证（NPU 输出 vs CPU fp32 golden）
 
-判据与实测按同一编号一一对应（① 对 ①，② 对 ②）：
+判据与实测按编号一一对应（① 对 ①，② 对 ②）：
 
-| 用例 | 判据 | 实测 | 结果 |
-|---|---|---|---|
-| A：NPU **fp32** 前向 | ① `max\|Δ\| ≤ 1e-4`<br>② `cos ≥ 0.99999` | ① `1.490e-07`（余量 671×）<br>② `0.99999988` | **PASS** |
-| B：NPU **bf16** 前向（autocast） | ① `max\|Δ\| ≤ 2e-2`<br>② `cos ≥ 0.9995` | ① `2.591e-03`（余量 7.7×）<br>② `0.99998170` | **PASS** |
-| C：10 步训练轨迹 | ① `Δloss ≤ 1e-2`<br>② `Δacc ≤ 2 pp` | ① `5.960e-08`<br>② `0.00 pp`（`1.0000` vs `1.0000`） | **PASS** |
+| 项 | 判据 | 实测 | 结果 | 日志 |
+|---|---|---|---|---|
+| A：NPU **fp32** 前向 vs CPU fp32 golden | ① `max\|Δ\| ≤ 1e-4`<br>② `cos ≥ 0.99999` | ① `1.490e-07`（余量 671×）<br>② `0.99999988` | **PASS** | `accuracy_950_20261115_rerun.txt` |
+| B：NPU **bf16** 前向（autocast）vs CPU fp32 golden | ① `max\|Δ\| ≤ 2e-2`<br>② `cos ≥ 0.9995` | ① `2.591e-03`（余量 7.7×）<br>② `0.99998170` | **PASS** | 同上 |
+| C：10 步训练轨迹（loss / acc 逐步比对） | ① `Δloss ≤ 1e-2`<br>② `Δacc ≤ 2 pp` | ① `5.960e-08`<br>② `0.00 pp`（`1.0000` vs `1.0000`） | **PASS** | 同上 |
 
 补充误差明细（不参与判定，仅说明误差幅度）：输出均值量级 `1.595e-01`；A（fp32）平均绝对误差 `5.470e-08`、相对误差 `3.43e-07`（0.0000343%）；B（bf16）平均绝对误差 `8.663e-04`、相对误差 `5.43e-03`（0.5431%）；C 两端 loss 轨迹均是 `1.594162 → 0.375242`。
 
 指标含义：
 
-- `max|Δ|`：NPU 输出与 CPU golden 逐元素相减，取绝对值的**最大值**（最大绝对误差，单位同输出量纲；本用例输出均值约 0.16）。
-- `mean|Δ|`：同一批元素上绝对误差的**平均值**，反映整体偏移。
-- `rel`：`mean(|Δ|) / mean(|golden|)`，即平均绝对误差占 golden 平均幅值的比例。
+- `max|Δ|`：NPU 输出与 CPU golden 逐元素相减后取绝对值的最大值（最大绝对误差，单位同输出量纲）。
+- `mean|Δ|`：同一批元素上绝对误差的平均值，反映整体偏移。
+- `rel`：`mean(|Δ|) / mean(|golden|)`，平均绝对误差占 golden 平均幅值的比例。
 - `cos`：两输出展平后的余弦相似度，1 表示方向完全一致。
 
-**验收结论：OK —— 三段判据全部满足**（脚本 `[verdict] A=True B=True C=True` → `ACCURACY PASS`）：fp32 最大绝对误差 `1.5e-07`（相对 0.0000343%）、bf16 `2.6e-03`（相对 0.5431%），余弦相似度 `≥0.99998`，10 步训练 loss 差 `6e-08`、accuracy 差 `0.00 pp`。
-
-日志：`results/accuracy_950_20261114_final.txt`（原始三段）、`results/accuracy_950_20261115_rerun.txt`（补充 mean|Δ| 与相对误差百分比）
+**验收结论：OK —— 三段判据全部满足**（脚本 `[verdict] A=True B=True C=True` → `ACCURACY PASS`），无失败项。
 
 ### 3.2 功能、性能与多卡
 
-| 项 | 结果 | 判定 | 日志 |
-|---|---|---|---|
-| 冒烟（前向 + 反向 + 3 步优化） | loss 有限且下降（1.610520 → 0.794862）、参数已更新（`param_delta = 3.008e-03`）；首步 ~610–645 ms（编译预热）→ 稳态 **76.9 / 77.3 ms** | **PASS** | `results/smoke_950_20261114_final.txt` |
-| mask 形态（kernel 级） | float 加性 139.0 µs / 45 kernel → bool 36.9 µs / 6 kernel（`FlashAttentionScoreV4`），**3.77×**；端到端中位 **+2.4%** | **PASS**（kernel 落点验证成立）→ 作为可选开关保留，不默认开 | `results/kd_*.csv`、`results/bench_mask_mode_950_20261114.txt` |
-| 多卡扩展（每 rank 本地 batch 64） | 1/2/4/8 die 稳态 **829.5 / 1,303.6 / 2,348.3 / 3,686.2** samples/s = **1.00 / 1.57 / 2.83 / 4.44×**（效率 78.6% / 70.8% / 55.5%） | **PASS**（吞吐随 die 数单调上升，扩展比符合预期） | `results/scaling_real_data_950_20261114.txt` |
-| DDP 梯度等价 | 2 die DDP 与单进程同全局 batch：梯度 `worst rel\|Δg\| = 1.211e-06`（门槛 1e-5），loss 差 `Δ = 0.000e+00` | **PASS — 等价** | `results/verify_950_20261115_rerun.txt` |
-| 端到端训练（真实数据） | 1,000 行 2 epoch 跑通：单 die 13 步/epoch、**78.9 ms/步 / 811.2 samples/s**、val AUC 0.5429；2 die **99.1 ms/步 / 646.0 samples/s**（样本极小，不代表任务精度） | **PASS**（能训完、指标正常产出） | `results/train_hf_real_950_20261114.txt`、`results/train_hf_real_2card_950_20261114.txt` |
+| 项 | 判据 | 实测 | 结果 | 日志 |
+|---|---|---|---|---|
+| 冒烟（前向 + 反向 + 3 步优化） | loss 有限且下降、参数有更新 | loss `1.610520 → 0.794862`、`param_delta = 3.008e-03`；首步 ~610–645 ms（编译预热）→ 稳态 **76.9 / 77.3 ms** | **PASS** | `smoke_950_20261114_final.txt` |
+| mask 形态（kernel 级） | bool mask 落 `FlashAttentionScoreV4`，kernel 耗时显著低于 float 加性 | float 139.0 µs / 45 kernel → bool 36.9 µs / 6 kernel（**3.77×**）；端到端中位 **+2.4%** | **PASS**（保留为可选开关，不默认开） | `kd_*.csv`、`bench_mask_mode_950_20261114.txt` |
+| 多卡扩展（每 rank 本地 batch 64） | 吞吐随 die 数单调上升 | 1/2/4/8 die 稳态 **829.5 / 1,303.6 / 2,348.3 / 3,686.2** samples/s = **1.00 / 1.57 / 2.83 / 4.44×**（效率 78.6% / 70.8% / 55.5%） | **PASS** | `scaling_real_data_950_20261114.txt` |
+| DDP 梯度等价 | `worst rel\|Δg\| ≤ 1e-5` 且 `Δloss = 0` | 2 die DDP vs 单进程同全局 batch：`worst rel\|Δg\| = 1.211e-06`、loss 差 `Δ = 0.000e+00` | **PASS — 等价** | `verify_950_20261115_rerun.txt` |
+| 端到端训练（真实数据） | 能训完 epoch 并产出 val 指标 | 1,000 行 2 epoch：单 die 13 步/epoch、**78.9 ms/步 / 811.2 samples/s**、val AUC 0.5429；2 die **99.1 ms/步 / 646.0 samples/s**（样本极小，不代表任务精度） | **PASS** | `train_hf_real_950_20261114.txt`、`train_hf_real_2card_950_20261114.txt` |
 
-指标含义（DDP 行）：
+指标含义：
 
 - `worst rel|Δg|`：逐个参数张量算 `max|g_DDP − g_单进程| / max|g_单进程|`（分母取该张量自身最大绝对值，下限 `1e-12`），再在全部 747 个张量上取**最大值** —— 即「最坏那一个梯度张量的相对偏差」，比平均相对误差更严格。
 
