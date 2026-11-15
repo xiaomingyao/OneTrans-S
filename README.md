@@ -21,7 +21,8 @@ git -C GPU_Reference status --porcelain # 空 = 未被改动
 |---|---|
 | `GPU_Reference/` | **submodule** → 上游原仓 @ `8febd7e`（零改动，用于 diff 与数值对照） |
 | `OneTrans_NPU/` | 移植实现：`npu_compat.py`（兼容层）+ `main_pytorch.py`（+9 行）+ `scripts/run_taac2026_sample.py` + `tests/`（13 个探针 + 2 个批量脚本） |
-| `docs/` | 迁移指导 v4、适配报告 v3、分阶段并排实现 v2、GPU/NPU 对照 v1、`npu_changes.diff`、配图与 HTML 生成器 |
+| `docs/` | 迁移指导 v4、适配报告 v3、分阶段并排实现 v2、GPU/NPU 对照 v1、`npu_changes.diff`、`figures/` |
+| `tools/` | 文档与配图生成器（`gen_html.py` / `gen_html_pair.py` / `gen_fig_mask_cost.py` / `build_merged_v3.py`） |
 | `results/` | 全部实测日志（冒烟 / 精度三段 / AMP / mask / DDP / 真实数据 / 合成数据） |
 
 **验证环境**：Ascend 950DT 单机 8 die；CANN 9.x；Python 3.11；torch 2.7.1+cpu、torch_npu 2.7.1.post4。
@@ -122,7 +123,7 @@ python OneTrans_NPU/scripts/run_taac2026_sample.py --device npu --epochs 2
 | `docs/GPU_VS_NPU_COMPARE_bytedance_onetrans_v1_20261114.md` | 三层证据链（代码 / 结构 / 数值） |
 | `docs/npu_changes.diff` | 完整改动 diff |
 
-- `docs/` 只保留每个文档的最新 `.md`；历史版本与 `.html` 已移出，需要 HTML 用 `docs/gen_html*.py` 现场生成。
+- `docs/` 只放文档（最新 `.md` + `npu_changes.diff` + `figures/`）；历史版本与 `.html` 已移出，脚本统一在 `tools/`，需要 HTML 时现场生成。
 - 脱敏：导出前已把工号路径（`/mnt/paas/<工号>/…`）、内网 IP、内部域名、主机名替换为占位符；仓库为 **private**。
 - 本仓**不含** checkpoint、profiling 原始目录、数据集本体。
 - 所有数字来自 950DT 单机 + 上述软件栈，换机型或换 CANN/torch 版本需重测，不可直接外推。

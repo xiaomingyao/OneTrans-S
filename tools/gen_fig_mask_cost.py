@@ -54,6 +54,6 @@ for sp in ("top", "right"): ax2.spines[sp].set_visible(False)
 ax2.set_title("(b) 端到端只 +1.6% / +3.7%：成本在多组小 FFN，不在 attention", fontsize=10.5, loc="left")
 
 fig.tight_layout(rect=(0, 0, 1, 0.93))
-out = "/root/bytedance-onetrans/docs/fig_mask_cost.png"
+out = "docs/figures/fig_mask_cost.png"
 fig.savefig(out, dpi=140)
 print("saved", out)
