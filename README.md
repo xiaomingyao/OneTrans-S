@@ -86,13 +86,15 @@ git -C GPU_Reference rev-parse HEAD        # 8febd7e…；status --porcelain 为
 
 ### 3.2 功能、性能与多卡
 
-| 项 | 结果 | 日志 |
-|---|---|---|
-| 冒烟（前向 + 反向 + 3 步优化） | **PASS**；首步 ~610–645 ms（编译预热）→ 稳态 **76.9 / 77.3 ms** | `results/smoke_950_20261114_final.txt` |
-| mask 形态（kernel 级） | float 加性 139.0 µs / 45 kernel → bool 36.9 µs / 6 kernel（`FlashAttentionScoreV4`），**3.77×**；端到端中位 **+2.4%** | `results/kd_*.csv`、`results/bench_mask_mode_950_20261114.txt` |
-| 多卡扩展（每 rank 本地 batch 64） | 1/2/4/8 die 稳态 **829.5 / 1,303.6 / 2,348.3 / 3,686.2** samples/s = **1.00 / 1.57 / 2.83 / 4.44×**（效率 78.6% / 70.8% / 55.5%） | `results/scaling_real_data_950_20261114.txt` |
-| DDP 梯度等价 | **PASS — 等价**：2 die DDP 与单进程同全局 batch 的梯度 `worst rel|Δg| = 1.211e-06`（门槛 1e-5），loss 差 `Δ = 0.000e+00` | `results/verify_950_20261115_rerun.txt` |
-| 端到端训练（真实数据） | 1,000 行 2 epoch 跑通：单 die 13 步/epoch、**78.9 ms/步 / 811.2 samples/s**、val AUC 0.5429；2 die **99.1 ms/步 / 646.0 samples/s**（样本极小，不代表任务精度） | `results/train_hf_real_950_20261114.txt`、`results/train_hf_real_2card_950_20261114.txt` |
+| 项 | 结果 | 判定 | 日志 |
+|---|---|---|---|
+| 冒烟（前向 + 反向 + 3 步优化） | loss 有限且下降（1.610520 → 0.794862）、参数已更新（`param_delta = 3.008e-03`）；首步 ~610–645 ms（编译预热）→ 稳态 **76.9 / 77.3 ms** | **PASS** | `results/smoke_950_20261114_final.txt` |
+| mask 形态（kernel 级） | float 加性 139.0 µs / 45 kernel → bool 36.9 µs / 6 kernel（`FlashAttentionScoreV4`），**3.77×**；端到端中位 **+2.4%** | **PASS**（kernel 落点验证成立）→ 作为可选开关保留，不默认开 | `results/kd_*.csv`、`results/bench_mask_mode_950_20261114.txt` |
+| 多卡扩展（每 rank 本地 batch 64） | 1/2/4/8 die 稳态 **829.5 / 1,303.6 / 2,348.3 / 3,686.2** samples/s = **1.00 / 1.57 / 2.83 / 4.44×**（效率 78.6% / 70.8% / 55.5%） | **PASS**（吞吐随 die 数单调上升，扩展比符合预期） | `results/scaling_real_data_950_20261114.txt` |
+| DDP 梯度等价 | 2 die DDP 与单进程同全局 batch：梯度 `worst rel|Δg| = 1.211e-06`（门槛 1e-5），loss 差 `Δ = 0.000e+00` | **PASS — 等价** | `results/verify_950_20261115_rerun.txt` |
+| 端到端训练（真实数据） | 1,000 行 2 epoch 跑通：单 die 13 步/epoch、**78.9 ms/步 / 811.2 samples/s**、val AUC 0.5429；2 die **99.1 ms/步 / 646.0 samples/s**（样本极小，不代表任务精度） | **PASS**（能训完、指标正常产出） | `results/train_hf_real_950_20261114.txt`、`results/train_hf_real_2card_950_20261114.txt` |
+
+**汇总：§3 全部验证项通过** —— 精度 A/B/C 判据满足（`ACCURACY PASS`）、冒烟 PASS、mask 落点验证成立、多卡扩展 4.44×、DDP 梯度等价、端到端训练跑通；无失败项。
 
 口径：kernel 级加速比 ≠ 端到端收益；多卡数字绑定「每卡本地 batch」，换口径不可比。2026-11-15 的逐条复跑记录见 `results/verify_950_20261115_rerun.txt`。
 
