@@ -28,7 +28,58 @@ git -C GPU_Reference status --porcelain # 空 = 未被改动
 
 **验证环境**：Ascend 950DT 单机 8 die；CANN 9.x；Python 3.11；torch 2.7.1+cpu、torch_npu 2.7.1.post4。
 
-## 2. 迁移到昇腾 950 的修改说明
+## 2. 工程结构与模块说明
+
+### 2.1 目录职责
+
+```
+onetrans-d/
+├── GPU_Reference/            # submodule：上游参考实现，零改动（diff 与数值对照的唯一基准）
+├── OneTrans_NPU/             # 移植实现（改动只在这里）
+│   ├── main_pytorch.py       # 模型 + 训练主程序（325 行；对上游客 +9 行）
+│   ├── npu_compat.py         # 平台兼容层，新增 160 行，唯一平台差异出口
+│   ├── models/               # TAACOneTransClassifier + 金字塔调度（116 行，0 改动）
+│   ├── utils/                # 数据解析 331 行 / 指标 47 行 / 通用 43 行（0 改动）
+│   ├── scripts/              # 训练装配入口（452 行，+104/−34）
+│   └── tests/                # 13 个探针 + 2 个批量脚本，全部可独立跑
+├── docs/                     # GPU 与 NPU 代码实现对比 / 按五阶段的迁移对照
+├── patches/npu_changes.diff   # 完整改动 diff（299 行）
+├── results/                  # 15 项：11 份日志 + 3 份 kernel 明细 + 运行元数据
+└── tools/                    # 文档与配图生成器（不改代码，只产 HTML/图）
+```
+
+### 2.2 四个关键文件的分工
+
+| 文件 | 行数 | 职责 | 改动 |
+|---|---:|---|---|
+| `OneTrans_NPU/npu_compat.py` | 160 | **唯一平台差异出口**：设备初始化（`init_device`）、AMP 能力门（`should_enable_amp`）、scaler（`build_scaler`，NPU 用 no-op）、autocast（`autocast_context`）、环境指纹（`describe`）、分布式（`init_distributed` / `barrier` / `shutdown`） | 新增 |
+| `OneTrans_NPU/scripts/run_taac2026_sample.py` | 452 | **训练装配入口**：argparse（数据集 / 序列长度 / 金字塔层数 / batch / amp / DDP 开关）→ 数据加载 → 模型构建 → 训练与验证循环 → 逐 epoch 日志与 `[perf]` 统计 | +104/−34 |
+| `OneTrans_NPU/main_pytorch.py` | 325 | **模型与训练主干**：`FFNLayer` / `RMSNorm` / `CausalMaskAttention`（注意力 + mask 构造）/ `OneTransBlock` / `MultiOneTransBlock` / `main()` | +9（仅 mask dtype 开关） |
+| `OneTrans_NPU/models/taac_onetrans.py` | 116 | `TAACOneTransClassifier` 分类头与 `linear_pyramid_schedule`（金字塔序列长度调度） | 0 |
+
+数据侧 `utils/taac_data.py`（331 行）负责把 HF 数据行解析成 `non_seq` / `seq` 两组张量（兼容 flat schema 与嵌套 schema）；指标在 `utils/metrics.py`（AUC / acc）。
+
+### 2.3 测试与探针（`OneTrans_NPU/tests/`）
+
+| 脚本 | 回答什么问题 |
+|---|---|
+| `smoke_npu.py` | 能否跑起来：前向 → 反向 → 3 步优化，断言 loss 有限、参数有更新 |
+| `accuracy_npu.py` | 精度是否对齐：A) NPU fp32 vs CPU fp32、B) NPU bf16 vs CPU fp32、C) 10 步训练轨迹 |
+| `compare_ref_vs_npu.py` | 与上游是否同一份实现：同 seed 建模型比 state_dict 键序/参数，再比 logits / loss / 全部梯度（两侧各起子进程） |
+| `compare_mask_semantics.py` | 4 种 mask 类型的「允许集」是否逐元素一致（比语义不比张量） |
+| `probe_sdpa_kernel.py` | SDPA 到底落到哪个 kernel：float 加性 mask vs bool mask |
+| `bench_mask_mode.py` | mask 形态的端到端步时 A/B（同进程交替） |
+| `bench_amp_npu.py` | AMP 划不划算：同进程交替 fp32 / bf16，取中位步时与峰值 HBM |
+| `probe_amp_npu.py` | 「以为开了 AMP」与「真的开了」是否一致：autocast 生效性、默认 dtype、输出 dtype、scaler 形态 |
+| `probe_hccl_dtypes.py` | HCCL 的 `all_gather` / `all_reduce` 支持哪些 dtype（fp64 归约不支持等） |
+| `probe_ddp_collective.py` | 最小复现：DDP 反向后紧接自己的集合通信会不会卡住 |
+| `ddp_equiv_npu.py` | 多卡梯度等价：DDP(W 卡 × 本地 batch) 的梯度是否等于单进程全局 batch |
+| `probe_transfer_to_npu.py` | `import torch_npu` 与 `transfer_to_npu` 分别替换了多少 CUDA API（三模式各起子进程） |
+| `run_all_950.sh` / `run_ddp_950.sh` | 单机批量：冒烟 + 精度 + 端到端；多卡：1/2/4/8 die 扩展性 |
+
+设计约束：探针都是**独立可跑的单文件**，失败时只影响自己；训练入口只做装配，不含模型或平台细节。
+
+## 3. 迁移到昇腾 950 的修改说明
 
 改动全部落在「接线层」：模型与数据管道零改动，平台差异收敛到一个新文件。
 
@@ -51,9 +102,9 @@ git -C GPU_Reference status --porcelain # 空 = 未被改动
 
 1. **模型文件零改动**——要改模型才能跑，说明改错了层；
 2. **训练循环里不做跨卡归约**——实测 epoch 末 `all_gather` + `.cpu()` 会卡在 D2H；改由「训练集按 rank 切分 + 验证在 rank0 全量」，指标不需要集合通信；
-3. **AMP 默认关闭**——本模型 bf16 反而更慢（见 §3），`should_enable_amp` 只在显式 `--amp --amp-dtype bf16` 时放行，且 GradScaler 走 no-op。
+3. **AMP 默认关闭**——本模型 bf16 反而更慢（见 §4），`should_enable_amp` 只在显式 `--amp --amp-dtype bf16` 时放行，且 GradScaler 走 no-op。
 
-## 3. 测试结论
+## 4. 测试结论
 
 | 项 | 结果 | 日志 |
 |---|---|---|
@@ -74,7 +125,7 @@ git -C GPU_Reference status --porcelain # 空 = 未被改动
 2. **不要把 kernel 加速比当收益**：bool mask kernel 级 3.77×，端到端中位只有 +2.4%；AMP 在本模型是负收益（步时 +27.5%）。
 3. **多卡按生产口径接线**：循环内不做集合通信；1→8 die 扩展比 4.43×（效率 55.3%），口径绑定「每卡本地 batch 64」，换口径不可比。
 
-## 4. 复刻命令
+## 5. 复刻命令
 
 ```bash
 # 0) 取代码（含参考实现）
@@ -114,7 +165,7 @@ python OneTrans_NPU/scripts/run_taac2026_sample.py --device npu --epochs 2
 
 一键全量：`bash OneTrans_NPU/tests/run_all_950.sh`。
 
-## 5. 文档与边界
+## 6. 文档与边界
 
 | 文档 | 用途 |
 |---|---|
