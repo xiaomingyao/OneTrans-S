@@ -225,7 +225,7 @@ no-op scaler 保留 `scale/step/update/unscale_` 调用形态，训练循环不�
 | 4 | 4 | 109.0 ms | 2 348.3 | **2.83×** | 70.8% |
 | 8 | 2 | 138.9 ms | 3 686.2 | **4.44×** | 55.5% |
 
-口径说明：**稳态 = 剔除首个 epoch 后 7 个 epoch 的均值**（与 `results/scaling_real_data_950_20261114.txt` 的 `steady_epoch_wall_s n=7` 一致）；数据集只有 1000 行（train 800），8 卡时每 epoch 仅 2 步 ⇒ 8 卡数字**仅供参考**（稳态 7 个 epoch = 14 步）。要更稳的扩展比需要更大数据集或更长 epoch 数。
+口径说明：**稳态 = 剔除首个 epoch 后 7 个 epoch 的均值**（与 `results/scaling_real_data_950.txt` 的 `steady_epoch_wall_s n=7` 一致）；数据集只有 1000 行（train 800），8 卡时每 epoch 仅 2 步 ⇒ 8 卡数字**仅供参考**（稳态 7 个 epoch = 14 步）。要更稳的扩展比需要更大数据集或更长 epoch 数。
 
 ---
 

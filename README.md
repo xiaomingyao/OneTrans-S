@@ -14,9 +14,9 @@ git -C GPU_Reference rev-parse HEAD        # 8febd7e…；status --porcelain 为
 
 本仓做的事：
 
-1. **迁移**：把这份 GPU 代码迁到 950DT，改动只在接线层（见 §2）。
-2. **取证**：冒烟、三段精度、DDP 梯度等价、1–8 die 扩展性，全部留可复跑探针与日志（见 §3）。
-3. **复现**：4 条命令重跑核心结论（见 §4），逐项细节见 `docs/`。
+1. **迁移**：把这份 GPU 代码迁到 950DT，改动只在接线层（见 §3）。
+2. **取证**：冒烟、三段精度、DDP 梯度等价、1–8 die 扩展性，全部留可复跑探针与日志（见 §4）。
+3. **复现**：4 条命令重跑核心结论（见 §5），逐项细节见 `docs/`。
 
 | 目录 | 内容 |
 |---|---|
@@ -24,10 +24,10 @@ git -C GPU_Reference rev-parse HEAD        # 8febd7e…；status --porcelain 为
 | `OneTrans_NPU/` | 移植实现：`npu_compat.py`（兼容层）+ `main_pytorch.py` + `scripts/run_taac2026_sample.py` + `tests/`（探针） |
 | `docs/` | `GPU_VS_NPU_CODE_IMPLEMENTATION.md`（代码实现对比）· `MIGRATION.md`（五阶段迁移对照） |
 | `patches/` | `npu_changes.diff`（完整改动） |
-| `results/` | 各类实测日志（§3 每行标了对应文件） |
+| `results/` | 各类实测日志（§4 每行标了对应文件） |
 | `tools/` | 文档与配图生成器 |
 
-### 1.1 验证环境
+## 2. 验证环境
 
 | 项 | 值 |
 |---|---|
@@ -46,7 +46,7 @@ git -C GPU_Reference rev-parse HEAD        # 8febd7e…；status --porcelain 为
 2. 950 上 AMP 只放行 bf16（平台 autocast 默认 dtype 是 fp16；本仓按实测只用 bf16），FP8 无直调入口。
 3. 数字绑定本表环境，换机型或换 CANN / torch 版本需重测。
 
-## 2. 从 GPU 迁移到 NPU
+## 3. 从 GPU 迁移到 NPU
 
 改动集中在「接线层」，模型定义与数据管道**零改动**：触碰上游 2 个文件 **147 行**（`main_pytorch.py` +9/−0、`scripts/run_taac2026_sample.py` +104/−34，占 1,233 行活跃 Python 的 11.9%），另新增兼容层 `npu_compat.py` 160 行；`models/*`、`utils/*` **0 行**。
 
@@ -64,17 +64,17 @@ git -C GPU_Reference rev-parse HEAD        # 8febd7e…；status --porcelain 为
 - 按五阶段并排对照（GPU 左 / NPU 右，标出哪段零改动） → [`docs/MIGRATION.md`](docs/MIGRATION.md)
 - 逐行 diff → [`patches/npu_changes.diff`](patches/npu_changes.diff)（对上游副本 `patch -p1` 可精确复原 `OneTrans_NPU/`）
 
-## 3. 测试验证
+## 4. 测试验证
 
 两表统一为「项 / 判据 / 实测 / 结果 / 日志」五列；日志列的路径均在 `results/` 下。
 
-### 3.1 精度验证（NPU 输出 vs CPU fp32 golden）
+### 4.1 精度验证（NPU 输出 vs CPU fp32 golden）
 
 判据与实测按编号一一对应（① 对 ①，② 对 ②）：
 
 | 项 | 判据 | 实测 | 结果 | 日志 |
 |---|---|---|---|---|
-| A：NPU **fp32** 前向 vs CPU fp32 golden | ① `max\|Δ\| ≤ 1e-4`<br>② `cos ≥ 0.99999` | ① `1.490e-07`（余量 671×）<br>② `0.99999988` | **PASS** | `accuracy_950_20261115_rerun.txt` |
+| A：NPU **fp32** 前向 vs CPU fp32 golden | ① `max\|Δ\| ≤ 1e-4`<br>② `cos ≥ 0.99999` | ① `1.490e-07`（余量 671×）<br>② `0.99999988` | **PASS** | `accuracy_950_rerun.txt` |
 | B：NPU **bf16** 前向（autocast）vs CPU fp32 golden | ① `max\|Δ\| ≤ 2e-2`<br>② `cos ≥ 0.9995` | ① `2.591e-03`（余量 7.7×）<br>② `0.99998170` | **PASS** | 同上 |
 | C：10 步训练轨迹（loss / acc 逐步比对） | ① `Δloss ≤ 1e-2`<br>② `Δacc ≤ 2 pp` | ① `5.960e-08`<br>② `0.00 pp`（`1.0000` vs `1.0000`） | **PASS** | 同上 |
 
@@ -89,15 +89,15 @@ git -C GPU_Reference rev-parse HEAD        # 8febd7e…；status --porcelain 为
 
 **验收结论：OK —— 三段判据全部满足**（脚本 `[verdict] A=True B=True C=True` → `ACCURACY PASS`），无失败项。
 
-### 3.2 功能、性能与多卡
+### 4.2 功能、性能与多卡
 
 | 项 | 判据 | 实测 | 结果 | 日志 |
 |---|---|---|---|---|
-| 冒烟（前向 + 反向 + 3 步优化） | loss 有限且下降、参数有更新 | loss `1.610520 → 0.794862`、`param_delta = 3.008e-03`；首步 ~610–645 ms（编译预热）→ 稳态 **76.9 / 77.3 ms** | **PASS** | `smoke_950_20261114_final.txt` |
-| mask 形态（kernel 级） | bool mask 落 `FlashAttentionScoreV4`，kernel 耗时显著低于 float 加性 | float 139.0 µs / 45 kernel → bool 36.9 µs / 6 kernel（**3.77×**）；端到端中位 **+2.4%** | **PASS**（保留为可选开关，不默认开） | `kd_*.csv`、`bench_mask_mode_950_20261114.txt` |
-| 多卡扩展（每 rank 本地 batch 64） | 吞吐随 die 数单调上升 | 1/2/4/8 die 稳态 **829.5 / 1,303.6 / 2,348.3 / 3,686.2** samples/s = **1.00 / 1.57 / 2.83 / 4.44×**（效率 78.6% / 70.8% / 55.5%） | **PASS** | `scaling_real_data_950_20261114.txt` |
-| DDP 梯度等价 | `worst rel\|Δg\| ≤ 1e-5` 且 `Δloss = 0` | 2 die DDP vs 单进程同全局 batch：`worst rel\|Δg\| = 1.211e-06`、loss 差 `Δ = 0.000e+00` | **PASS — 等价** | `verify_950_20261115_rerun.txt` |
-| 端到端训练（真实数据） | 能训完 epoch 并产出 val 指标 | 1,000 行 2 epoch：单 die 13 步/epoch、**78.9 ms/步 / 811.2 samples/s**、val AUC 0.5429；2 die **99.1 ms/步 / 646.0 samples/s**（样本极小，不代表任务精度） | **PASS** | `train_hf_real_950_20261114.txt`、`train_hf_real_2card_950_20261114.txt` |
+| 冒烟（前向 + 反向 + 3 步优化） | loss 有限且下降、参数有更新 | loss `1.610520 → 0.794862`、`param_delta = 3.008e-03`；首步 ~610–645 ms（编译预热）→ 稳态 **76.9 / 77.3 ms** | **PASS** | `smoke_950_final.txt` |
+| mask 形态（kernel 级） | bool mask 落 `FlashAttentionScoreV4`，kernel 耗时显著低于 float 加性 | float 139.0 µs / 45 kernel → bool 36.9 µs / 6 kernel（**3.77×**）；端到端中位 **+2.4%** | **PASS**（保留为可选开关，不默认开） | `kd_*.csv`、`bench_mask_mode_950.txt` |
+| 多卡扩展（每 rank 本地 batch 64） | 吞吐随 die 数单调上升 | 1/2/4/8 die 稳态 **829.5 / 1,303.6 / 2,348.3 / 3,686.2** samples/s = **1.00 / 1.57 / 2.83 / 4.44×**（效率 78.6% / 70.8% / 55.5%） | **PASS** | `scaling_real_data_950.txt` |
+| DDP 梯度等价 | `worst rel\|Δg\| ≤ 1e-5` 且 `Δloss = 0` | 2 die DDP vs 单进程同全局 batch：`worst rel\|Δg\| = 1.211e-06`、loss 差 `Δ = 0.000e+00` | **PASS — 等价** | `verify_950_rerun.txt` |
+| 端到端训练（真实数据） | 能训完 epoch 并产出 val 指标 | 1,000 行 2 epoch：单 die 13 步/epoch、**78.9 ms/步 / 811.2 samples/s**、val AUC 0.5429；2 die **99.1 ms/步 / 646.0 samples/s**（样本极小，不代表任务精度） | **PASS** | `train_hf_real_950.txt`、`train_hf_real_2card_950.txt` |
 
 指标含义：
 
@@ -105,9 +105,9 @@ git -C GPU_Reference rev-parse HEAD        # 8febd7e…；status --porcelain 为
 
 **汇总：§3 全部验证项通过** —— 精度 A/B/C 判据满足（`ACCURACY PASS`）、冒烟 PASS、mask 落点验证成立、多卡扩展 4.44×、DDP 梯度等价、端到端训练跑通；无失败项。
 
-口径：kernel 级加速比 ≠ 端到端收益；多卡数字绑定「每卡本地 batch」，换口径不可比。2026-11-15 的逐条复跑记录见 `results/verify_950_20261115_rerun.txt`。
+口径：kernel 级加速比 ≠ 端到端收益；多卡数字绑定「每卡本地 batch」，换口径不可比。2026-11-15 的逐条复跑记录见 `results/verify_950_rerun.txt`。
 
-## 4. 快速开始
+## 5. 快速开始
 
 ```bash
 # 冒烟（前向 + 反向 + 3 步）
