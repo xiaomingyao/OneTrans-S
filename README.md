@@ -21,7 +21,7 @@ git -C GPU_Reference status --porcelain # 空 = 未被改动
 |---|---|
 | `GPU_Reference/` | **submodule** → 上游原仓 @ `8febd7e`（零改动，用于 diff 与数值对照） |
 | `OneTrans_NPU/` | 移植实现：`npu_compat.py`（兼容层）+ `main_pytorch.py`（+9 行）+ `scripts/run_taac2026_sample.py` + `tests/`（13 个探针 + 2 个批量脚本） |
-| `docs/` | `GPU_VS_NPU_CODE_IMPLEMENTATION.md`（GPU 与 NPU 代码实现对比）、`MIGRATION_BY_STAGE…_v2.md`（按五阶段的实现对照）、`figures/` |
+| `docs/` | `GPU_VS_NPU_CODE_IMPLEMENTATION.md`（GPU 与 NPU 代码实现对比）、`MIGRATION.md`（按五阶段的迁移实现对照）、`figures/` |
 | `patches/` | `npu_changes.diff`（完整改动 diff） |
 | `tools/` | 文档与配图生成器（`gen_html.py` / `gen_html_pair.py` / `gen_fig_mask_cost.py` / `build_merged_v3.py`） |
 | `results/` | 全部实测日志（冒烟 / 精度三段 / AMP / mask / DDP / 真实数据 / 合成数据） |
@@ -119,7 +119,7 @@ python OneTrans_NPU/scripts/run_taac2026_sample.py --device npu --epochs 2
 | 文档 | 用途 |
 |---|---|
 | `docs/GPU_VS_NPU_CODE_IMPLEMENTATION.md` | **GPU 与 NPU 代码实现对比**：按「设备 / 精度能力门 / 集合通信 / kernel 落点 / 收尾 / 计时」分类，逐项给「改前 vs 改后 + 判据」 |
-| `docs/MIGRATION_BY_STAGE_onetrans_v2_20261114.md` | **NPU 与 GPU 代码实现对比**：五阶段逐段并排（GPU 左 / NPU 右），标出哪段零改动、哪段必须改 |
+| `docs/MIGRATION.md` | **按五阶段的迁移实现对照**：逐段并排（GPU 左 / NPU 右），标出哪段零改动、哪段必须改 |
 | `patches/npu_changes.diff` | 完整改动 diff（+113/−34，99 行上下文外原文） |
 
 - `docs/` 只放这两篇最新 `.md` 与 `figures/`；迁移指导（v4）、GPU/NPU 数值对照（v1）、历史版本与全部 `.html` 已移出仓库，脚本统一在 `tools/`。
