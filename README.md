@@ -67,13 +67,13 @@ bash tests/run_ddp_950.sh
 
 | 文档 | 用途 |
 |---|---|
-| `docs/MIGRATION_GUIDE_bytedance_onetrans_v4_20261114.{md,html}` | 迁移指导（最新版：改什么、为什么、判据） |
-| `docs/ADAPT_REPORT_bytedance_onetrans_v3_20261114.{md,html}` | 适配报告（按「设备 / 精度能力门 / 集合通信 / kernel 落点 / 收尾 / 计时」分类） |
-| `docs/MIGRATION_BY_STAGE_onetrans_v2_20261114.{md,html}` | 五阶段并排实现（GPU 左 / NPU 右，代码高亮） |
-| `docs/GPU_VS_NPU_COMPARE_bytedance_onetrans_v1_20261114.{md,html}` | 与参考实现的三层证据链（代码 / 结构 / 数值） |
+| `docs/MIGRATION_GUIDE_bytedance_onetrans_v4_20261114.md` | 迁移指导（最新版：改什么、为什么、判据） |
+| `docs/ADAPT_REPORT_bytedance_onetrans_v3_20261114.md` | 适配报告（按「设备 / 精度能力门 / 集合通信 / kernel 落点 / 收尾 / 计时」分类） |
+| `docs/MIGRATION_BY_STAGE_onetrans_v2_20261114.md` | 五阶段并排实现（GPU 左 / NPU 右，代码高亮） |
+| `docs/GPU_VS_NPU_COMPARE_bytedance_onetrans_v1_20261114.md` | 与参考实现的三层证据链（代码 / 结构 / 数值） |
 | `docs/npu_changes.diff` | 完整改动 diff |
 
-> `docs/` 下同时保留了 v1–v3 历史版本，其中 v1/v2 的「合成数据集」口径已废弃，以 v3/v4 为准。
+> 历史版本（v1–v3 指导、v1/v2 适配报告、v1 分阶段文档）与全部 `.html` 已移出仓库，只保留每个文档的最新 `.md`；需要 HTML 用 `docs/gen_html*.py` 现场生成。
 
 ## 脱敏与边界
 
