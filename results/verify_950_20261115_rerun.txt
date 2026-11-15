@@ -1,0 +1,90 @@
+# 2026-11-15 在 Ascend 950DT 上按 README §5 逐条复跑的输出（容器 zeus-950-v2 / CANN 9.1.0 / torch 2.7.1+cpu + torch_npu 2.7.1.post4）
+# 说明：本轮目的是验证「仓库代码 + 文档」自洽，不是新一轮性能采集；步时与 results/ 里同批日志的差属于抖动。
+
+########## /tmp/v3.log ##########
+=== A) 冒烟 smoke_npu.py ===
+[env] {'device_type': 'npu', 'torch': '2.7.1+cpu', 'torch_npu': '2.7.1.post4', 'soc': 'Ascend950DT_9582'}
+[model] params=6.00M  blocks=1+4  seq_len=64  ns_len=4
+[step 0] loss=1.610520 grad_norm=0.9789 645.3 ms
+[step 1] loss=1.199051 grad_norm=1.1797 75.5 ms
+[step 2] loss=0.794862 grad_norm=1.1984 75.0 ms
+[check] loss_finite=True param_delta=3.008e-03 loss_drop=0.815657
+SMOKE PASS
+=== B) 精度 accuracy_npu.py ===
+usage: accuracy_npu.py [-h] [--steps STEPS]
+accuracy_npu.py: error: unrecognized arguments: --device npu
+
+########## /tmp/v4.log ##########
+=== B) accuracy --steps 10 ===
+[A] NPU fp32 vs CPU fp32 : max|Δ|=1.490e-07 cos=0.99999988 rel=3.429e-07
+[B] NPU bf16 vs CPU fp32 : max|Δ|=2.591e-03 cos=0.99998170 rel=5.431e-03
+[C] loss  CPU 1.594162→0.375242 | NPU 1.594162→0.375242 | Δloss=5.960e-08
+[C] acc   CPU 1.0000 | NPU 1.0000 | Δ=0.00 pp
+[verdict] A=True B=True C=True
+ACCURACY PASS
+=== C) compare_ref_vs_npu ===
+  logits (B×C)           max|Δ|=2.313e-03  rel=7.66e-03  cos=0.99997882
+  loss (标量)              max|Δ|=2.797e-04  rel=4.20e-04  cos=1.00000000
+  参数逐位相同: keys_equal=True max|Δ|=0.000e+00
+  梯度 rel_max=1.817e-02 (n=747，其中数值零梯度 2 个，判零阈值 1.0e-08，全局 |g|max=1.494e-01)
+    stack_blocks.0.otb_list.0.cma.kqv_list.7.0.weight rel=1.82e-02 cos=0.99992207
+    stack_blocks.1.otb_list.0.cma.kqv_list.7.1.bias rel=1.61e-02 cos=0.99993310
+    base_block.otb_list.0.cma.kqv_list.2.0.bias    rel=1.59e-02 cos=0.99994636
+    stack_blocks.1.otb_list.0.cma.kqv_list.1.0.bias rel=1.58e-02 cos=0.99991409
+    base_block.otb_list.0.cma.kqv_list.4.0.bias    rel=1.57e-02 cos=0.99994466
+{"fp32": {"grad_max_rel": 1.2048232447994406e-06, "n_zero_grad": 2, "param_max_abs": 0.0}, "bf16": {"grad_max_rel": 0.0181740489354768, "n_zero_grad": 2, "param_max_abs": 0.0}}
+
+COMPARE DONE
+=== D) probe_hccl_dtypes ===
+  File "/tmp/od/OneTrans_NPU/tests/probe_hccl_dtypes.py", line 46, in main
+    local_rank = int(os.environ["LOCAL_RANK"])
+                     ~~~~~~~~~~^^^^^^^^^^^^^^
+  File "<frozen os>", line 678, in __getitem__
+KeyError: 'LOCAL_RANK'
+[ERROR] 2026-11-15-11:59:06 (PID:460614, Device:-1, RankID:-1) ERR99999 UNKNOWN applicaiton exception
+=== E) bench_mask_mode（默认跑 float/bool 两轮）===
+[float] p50=54.8 ms  p90=55.6  min=53.4  loss=0.809698
+[bool ] p50=53.9 ms  p90=56.8  min=53.1  loss=0.809698
+[delta] bool vs float: +1.6%  (54.8 -> 53.9 ms)
+[loss]  float=0.809698 bool=0.809698 Δ=5.960e-08
+
+########## /tmp/v5.log ##########
+=== F) probe_hccl_dtypes 无 torchrun（应给提示而非堆栈）===
+[probe] 该脚本是多 rank 探针，需用 torchrun 启动，例如：
+  torchrun --nproc_per_node=2 probe_hccl_dtypes.py
+=== G) torchrun -n 2 probe_hccl_dtypes float32 ===
+[probe] rank=0 world=2 dtype=float32 op=all_gather start
+[probe] rank=1 world=2 dtype=float32 op=all_gather start
+[probe] OK dtype=float32 op=all_gather/sum sum=96.0
+=== H) torchrun -n 2 ddp_equiv --local-batch 8 ===
+[A] 梯度等价 world=2 local_batch=8 global_batch=16 dtype=fp32
+    单进程 |g|max=1.543596e-01 worst rel|Δg|=1.211e-06 门槛=1.0e-05
+[B] loss 单进程=1.59416199 DDP均值=1.59416199 |Δ|=0.000e+00 门槛=1.0e-06
+[verdict] A=True B=True
+DDP-EQUIV PASS
+=== I) bench_amp_npu ===
+
+| 档位 | 步时中位(ms) | 峰值 HBM 增量(MiB) |
+|---|---:|---:|
+| fp32 | 54.8 | 109 |
+| bf16 | 68.9 | 99 |
+
+[verdict] bf16/fp32 步时比 = 1.257 (> 1 表示 bf16 更慢)
+AMP-BENCH DONE
+
+########## /tmp/v6.log ##########
+=== J) 单卡端到端训练（真实数据集，2 epoch，缓存离线）===
+  },
+  "non_seq_dim": 183,
+  "seq_feature_dim": 45,
+  "seq_len": 32
+}
+[run] device=npu samples=400 train=320 val=80
+[run] non_seq=(400, 183) seq=(400, 32, 45) classes=2
+[run] amp=True amp_dtype=bf16 grad_scaler=False device_type=npu mask_type=paper_causal pyramid_layers=3 pyramid_align=32 sep_token=True activation_checkpoint=False world_size=1 per_rank_batch=32
+[epoch 01] train_loss=0.4510 train_auc=0.4993 train_acc=0.8469 val_loss=0.3522 val_auc=0.3192 val_acc=0.8875
+[perf] epoch=01 wall=1.304s steps=10 step_ms=130.4 global_samples_per_s=245.4 world_size=1
+[epoch 02] train_loss=0.4417 train_auc=0.4419 train_acc=0.8531 val_loss=0.3566 val_auc=0.4038 val_acc=0.8875
+[perf] epoch=02 wall=0.783s steps=10 step_ms=78.3 global_samples_per_s=408.9 world_size=1
+[run] metadata saved to /tmp/onetrans_v/run_metadata.json
+[perf] steady_epoch_wall_s=0.783 n=1 world_size=1

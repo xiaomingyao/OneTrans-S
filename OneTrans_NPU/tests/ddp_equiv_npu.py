@@ -72,6 +72,11 @@ def main() -> int:
         print("[ddp-equiv] FAIL: 必须用 torchrun 拉起（缺少 LOCAL_RANK），单进程没有可比对象")
         return 1
 
+    if "LOCAL_RANK" not in os.environ:
+        raise SystemExit(
+            "[probe] 该脚本是多 rank 探针，需用 torchrun 启动，例如：\n"
+            "  torchrun --nproc_per_node=2 %s" % os.path.basename(__file__)
+        )
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.npu.set_device(local_rank)
     dist.init_process_group(backend="hccl")

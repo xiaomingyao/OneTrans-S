@@ -125,6 +125,30 @@ onetrans-d/
 2. **不要把 kernel 加速比当收益**：bool mask kernel 级 3.77×，端到端中位只有 +2.4%；AMP 在本模型是负收益（步时 +27.5%）。
 3. **多卡按生产口径接线**：循环内不做集合通信；1→8 die 扩展比 4.43×（效率 55.3%），口径绑定「每卡本地 batch 64」，换口径不可比。
 
+### 4.1 现场复跑校验（2026-11-15，Ascend 950DT / CANN 9.1.0 / torch 2.7.1 + torch_npu 2.7.1.post4）
+
+按 §5 的命令逐条在 950 上重跑，用于确认「仓库里的代码 + 文档」自洽；原始输出见 `results/verify_950_20261115_rerun.txt`。
+
+| # | 检查 | 结果 | 与 `results/` 的一致性 |
+|---|---|---|---|
+| 1 | `patch -p1` 还原三个文件 | `main_pytorch.py` / `scripts/run_taac2026_sample.py` / `npu_compat.py` 与仓库逐字节一致 | — |
+| 2 | 上游零改动 | `models/*`、`utils/*` 与 submodule 逐字节相同；仅 2 个目标文件有 diff（+9/−0、+104/−34） | 与 §3 改动面一致 |
+| 3 | `py_compile` + 两个入口 `--help` | 0 报错 | — |
+| 4 | `smoke_npu.py --device npu` | **SMOKE PASS**；首步 645.3 ms → 稳态 75.5 / 75.0 ms；loss 1.610520 → 1.199051 → 0.794862 | loss 三次逐位相同；步时 75.0–75.5 vs 日志 76.9–77.3（同批抖动） |
+| 5 | `accuracy_npu.py --steps 10` | **ACCURACY PASS**；A `1.490e-07` / cos `0.99999988`；B `2.591e-03`；C Δloss `5.960e-08` | 与日志**逐位相同** |
+| 6 | `compare_ref_vs_npu.py` | **COMPARE DONE**；参数 `max|Δ|=0`；bf16 logits `2.313e-03`、loss `2.797e-04`、梯度 `1.817e-02`；fp32 梯度 `1.2048e-06`（n=747） | 与日志一致 |
+| 7 | `torchrun -n2 probe_hccl_dtypes.py --dtype float32` | PASS（`sum=96.0`） | — |
+| 8 | `torchrun -n2 ddp_equiv_npu.py --local-batch 8` | **DDP-EQUIV PASS**；`worst rel|Δg| = 1.211e-06`（门槛 1e-5）、`Δloss = 0` | 补齐了原先未落盘的等价性数字 |
+| 9 | `bench_amp_npu.py` | fp32 **54.8 ms / 109 MiB** vs bf16 **68.9 ms / 99 MiB**，比 **1.257** | 日志 54.3/69.3（比 1.275）；同批抖动 |
+| 10 | `bench_mask_mode.py` | bool vs float **+1.6%** | 日志 4 次重复 −0.5%…+4.0%，本次落在区间内 |
+| 11 | 单卡端到端训练（400 行 / 2 epoch） | 跑通；78.3 ms/步、408.9 samples/s、val AUC 0.4038 | 数据子集不同，不做数值对比 |
+
+**本轮发现并已修的三处文档/代码问题**：
+
+1. `accuracy_npu.py` 不接受 `--device`（只有 `--steps`）——README 原命令会直接报 `unrecognized arguments`；
+2. `bench_mask_mode.py` 没有 `--mode` 参数（内部自己起 float/bool 两个子进程）——原命令同样报错；
+3. 三个多 rank 探针（`probe_hccl_dtypes` / `probe_ddp_collective` / `ddp_equiv_npu`）缺 `LOCAL_RANK` 时抛 `KeyError` 堆栈——已改为打印 `torchrun` 用法并退出。
+
 ## 5. 复刻命令
 
 ```bash
@@ -136,34 +160,38 @@ python OneTrans_NPU/tests/smoke_npu.py --device npu
 #    判据：loss 有限且下降；step_ms 第 0 步是编译预热，勿当稳态
 
 # 2) 精度三段（A/B/C）
-python OneTrans_NPU/tests/accuracy_npu.py --device npu
+python OneTrans_NPU/tests/accuracy_npu.py --steps 10
 #    判据：A ≤1e-4 且 cos≥0.99999；B ≤2e-2 且 cos≥0.9995；C Δloss≤1e-2
 
 # 3) 与参考实现对照（结构 + 数值；两侧各起子进程）
 python OneTrans_NPU/tests/compare_ref_vs_npu.py
 #    判据：键名/键序一致、参数 max|Δ|=0、747 个梯度 rel_max ≤1e-5
 
-# 4) mask 形态 A/B（kernel 级）
-python OneTrans_NPU/tests/bench_mask_mode.py --child --mode float
-python OneTrans_NPU/tests/bench_mask_mode.py --child --mode bool
+# 4) mask 形态 A/B（端到端步时；脚本内部自己起两个子进程跑 float / bool）
+python OneTrans_NPU/tests/bench_mask_mode.py
+#    单侧跑法：ONETRANS_ATTN_MASK=float python OneTrans_NPU/tests/bench_mask_mode.py --child
 
 # 5) AMP 划算性（同进程交替，取中位）
 python OneTrans_NPU/tests/bench_amp_npu.py
 
-# 6) 单卡训练（合成数据）
-python OneTrans_NPU/scripts/run_taac2026_sample.py --device npu --synthetic --epochs 2
+# 6) 单卡端到端训练（真实数据集；脚本没有 --synthetic，数据来自 HF）
+HF_ENDPOINT=https://hf-mirror.com python OneTrans_NPU/scripts/run_taac2026_sample.py \
+  --device npu --batch-size 32 --epochs 2 --seq-len 32 --d-model 64 \
+  --multi-num 2 --num-pyramid-layers 3 --amp --amp-dtype bf16 --output-dir /tmp/onetrans_out
 #    bool mask 变体：命令前加 ONETRANS_ATTN_MASK=bool
 
-# 7) 多卡（DDP/HCCL）
-bash OneTrans_NPU/tests/run_ddp_950.sh      # 默认 2 卡
+# 7) 多卡（DDP/HCCL）：梯度等价 + 1/2/4/8 die 扩展性
+bash OneTrans_NPU/tests/run_ddp_950.sh 64   # 参数 = 全局 batch（默认 64，按卡数均分到每 rank）
+#    只验梯度等价（不跑扩展性）：torchrun --nproc_per_node=2 OneTrans_NPU/tests/ddp_equiv_npu.py --local-batch 8
 #    判据：worst rel|Δg| ≤1e-5、Δloss=0；起跑前确认无残留进程占 HCCL 端口
 
-# 8) 真实数据（需 HF 栈：datasets + huggingface_hub + pyarrow，配 HF_ENDPOINT）
-python OneTrans_NPU/tests/probe_hccl_dtypes.py   # 先确认集合通信 dtype 支持面
-python OneTrans_NPU/scripts/run_taac2026_sample.py --device npu --epochs 2
+# 8) 集合通信 dtype 支持面（多卡前先确认；探针都是多 rank 脚本，必须 torchrun 起）
+torchrun --nproc_per_node=2 OneTrans_NPU/tests/probe_hccl_dtypes.py --dtype float32
 ```
 
-一键全量：`bash OneTrans_NPU/tests/run_all_950.sh`。
+一键全量：`bash OneTrans_NPU/tests/run_all_950.sh`（冒烟 → 精度 → 端到端）。
+
+> 这两个 `.sh` 是**本机封装**：内部写死了 `ssh 122` + `docker exec` + `/mnt/paas/<工号>/…` 中转路径，换机器需改顶部 5 个变量（`SRC` / `HOST` / `CT` / `PY` / 数据集）。只想在本机直接跑时，用上面 1–8 的逐条命令即可，那些命令不带任何宿主路径假设。
 
 ## 6. 文档与边界
 

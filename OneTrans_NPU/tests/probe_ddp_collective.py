@@ -34,6 +34,11 @@ def main() -> int:
     ap.add_argument("--find-unused", action="store_true")
     a = ap.parse_args()
 
+    if "LOCAL_RANK" not in os.environ:
+        raise SystemExit(
+            "[probe] 该脚本是多 rank 探针，需用 torchrun 启动，例如：\n"
+            "  torchrun --nproc_per_node=2 %s" % os.path.basename(__file__)
+        )
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.npu.set_device(local_rank)
     dist.init_process_group(backend="hccl")
