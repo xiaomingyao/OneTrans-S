@@ -46,13 +46,10 @@ git -C GPU_Reference status --porcelain # 空 = 未被改动
 | └ 其中多卡装配（DDP + rank 切分 + 收尾） | 80 | 6.5% |
 | 新增兼容层 `npu_compat.py`（不计入分母，新文件） | 160 | — |
 
-**三条硬口径**：
 
 1. **模型文件零改动**——要改模型才能跑，说明改错了层；
 2. **训练循环里不做跨卡归约**——实测 epoch 末 `all_gather` + `.cpu()` 会卡在 D2H；改由「训练集按 rank 切分 + 验证在 rank0 全量」，指标不需要集合通信；
 3. **AMP 默认关闭**——本模型 bf16 反而更慢（见 §3），`should_enable_amp` 只在显式 `--amp --amp-dtype bf16` 时放行，且 GradScaler 走 no-op。
-
-**范围外**：FP8（950 attention 不提供 e4m3/e5m2 入口）、H20 侧对照（本机无 GPU）、16 卡以上拓扑调优、真实业务数据集上的效果验收。
 
 ## 3. 测试结论
 
