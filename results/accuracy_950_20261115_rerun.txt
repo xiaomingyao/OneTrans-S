@@ -1,0 +1,8 @@
+# 2026-11-15 精度复跑（补充 mean|Δ|、输出均值量级、相对误差百分比）
+# 环境：Ascend950DT / CANN 9.1.0 / torch 2.7.1+cpu + torch_npu 2.7.1.post4
+[A] max|Δ|=1.490e-07 mean|Δ|=5.470e-08 |golden|mean=1.595e-01 rel=3.429e-07 (3.429e-05%) cos=0.99999988
+[B] max|Δ|=2.591e-03 mean|Δ|=8.663e-04 |golden|mean=1.595e-01 rel=5.431e-03 (5.431e-01%) cos=0.99998170
+[C] loss  CPU 1.594162→0.375242 | NPU 1.594162→0.375242 | Δloss=5.960e-08
+[C] acc   CPU 1.0000 | NPU 1.0000 | Δ=0.00 pp
+[verdict] A=True B=True C=True
+ACCURACY PASS

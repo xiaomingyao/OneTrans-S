@@ -60,9 +60,13 @@ def batch(bs=16, seq_len=32, seed=99):
 def stats(a: torch.Tensor, b: torch.Tensor):
     a = a.detach().float().reshape(-1)
     b = b.detach().float().reshape(-1)
-    return dict(max_abs=(a - b).abs().max().item(),
+    d = (a - b).abs()
+    ref_mean = b.abs().mean().clamp_min(1e-12)
+    return dict(max_abs=d.max().item(),
+                mean_abs=d.mean().item(),
+                ref_mean=ref_mean.item(),
                 cos=F.cosine_similarity(a, b, dim=0).item(),
-                rel=((a - b).abs().mean() / b.abs().mean().clamp_min(1e-12)).item())
+                rel=(d.mean() / ref_mean).item())
 
 
 def main() -> int:
@@ -84,8 +88,9 @@ def main() -> int:
 
     sA = stats(out_fp32, ref)
     sB = stats(out_bf16, ref)
-    print(f"[A] NPU fp32 vs CPU fp32 : max|Δ|={sA['max_abs']:.3e} cos={sA['cos']:.8f} rel={sA['rel']:.3e}")
-    print(f"[B] NPU bf16 vs CPU fp32 : max|Δ|={sB['max_abs']:.3e} cos={sB['cos']:.8f} rel={sB['rel']:.3e}")
+    for tag, s in (("A", sA), ("B", sB)):
+        print(f"[{tag}] max|Δ|={s['max_abs']:.3e} mean|Δ|={s['mean_abs']:.3e} "
+              f"|golden|mean={s['ref_mean']:.3e} rel={s['rel']:.3e} ({s['rel']*100:.3e}%) cos={s['cos']:.8f}")
 
     # C. 训练轨迹
     cpu_t = make_model()
