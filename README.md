@@ -94,6 +94,10 @@ git -C GPU_Reference rev-parse HEAD        # 8febd7e…；status --porcelain 为
 | DDP 梯度等价 | 2 die DDP 与单进程同全局 batch：梯度 `worst rel|Δg| = 1.211e-06`（门槛 1e-5），loss 差 `Δ = 0.000e+00` | **PASS — 等价** | `results/verify_950_20261115_rerun.txt` |
 | 端到端训练（真实数据） | 1,000 行 2 epoch 跑通：单 die 13 步/epoch、**78.9 ms/步 / 811.2 samples/s**、val AUC 0.5429；2 die **99.1 ms/步 / 646.0 samples/s**（样本极小，不代表任务精度） | **PASS**（能训完、指标正常产出） | `results/train_hf_real_950_20261114.txt`、`results/train_hf_real_2card_950_20261114.txt` |
 
+指标含义（DDP 行）：
+
+- `worst rel|Δg|`：逐个参数张量算 `max|g_DDP − g_单进程| / max|g_单进程|`（分母取该张量自身最大绝对值，下限 `1e-12`），再在全部 747 个张量上取**最大值** —— 即「最坏那一个梯度张量的相对偏差」，比平均相对误差更严格。
+
 **汇总：§3 全部验证项通过** —— 精度 A/B/C 判据满足（`ACCURACY PASS`）、冒烟 PASS、mask 落点验证成立、多卡扩展 4.44×、DDP 梯度等价、端到端训练跑通；无失败项。
 
 口径：kernel 级加速比 ≠ 端到端收益；多卡数字绑定「每卡本地 batch」，换口径不可比。2026-11-15 的逐条复跑记录见 `results/verify_950_20261115_rerun.txt`。
