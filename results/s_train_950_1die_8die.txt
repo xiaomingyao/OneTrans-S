@@ -257,3 +257,11 @@ torch.OutOfMemoryError: NPU out of memory. Tried to allocate 2.34 GiB (NPU 0; 91
 # E18 只捕获前向(NPUGraph, no_grad): 仍 rtStreamEndCapture 失败(旁路 stream 在前向内部, 与 DDP/HCCL 无关)
 # E19 torch.npu.make_graphed_callables(fwd+bwd): 捕获期 OOM(需2.78GiB, 剩671MiB; reserved 89.98/91.75)
 # eager 标度(1die, pyramid6, 关重算): batch512 fwd 67.4ms / step 229.2ms ; batch1024 step 443.2ms ⇒ 1.93x 线性
+
+## G1 SDPA 内置 causal（ONETRANS_SDPA_CAUSAL=1，q==k 的层）—— 有效
+# 精度: 模型 logits vs 显式 mask 逐位相同 (max|Δ|=0.0)
+# 依据: paper_causal=底右对齐; SDPA is_causal 在 q≠k 时是左上对齐(不等价, 4.26); q==k 时同一掩码
+# 单算子对照 (512,4,480,1203): bool mask 1.493 ms vs is_causal 0.406 ms (q<k 参考值)
+# 16die 档A: 1112.1 → 1053.5 ms (−5.27%), 29465.3 → 31104.8 sps, MFU 13.44→14.19%
+# 16die 档B: 892.5 → 847.3 ms (−5.06%), 36716.4 → 38672.9 sps, MFU 16.75→17.64%
+# 累计: 1942.1 → 1053.5(−45.75%)/847.3(−56.37%); sps +84.35%/+129.20%; 对论文407ms 2.59x/2.08x

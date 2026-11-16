@@ -20,6 +20,9 @@ _CKPT_SCOPE = os.environ.get("ONETRANS_CKPT_SCOPE", "all").lower()
 _FUSED_NORM = os.environ.get("ONETRANS_FUSED_NORM", "0") == "1"
 # [E7] _project_one 的 seq/ns 合并：cat → 预分配 + 原地写入（逐位等价，只改内存写路径）
 _CAT_INPLACE = os.environ.get("ONETRANS_CAT_INPLACE", "0") == "1"
+# [G1] query_len == key_len 的层用 SDPA 内置 is_causal（无掩码张量）。
+# 只有在这种层里「底右对齐」与「左上对齐」是同一个掩码 ⇒ 逐位等价；q<k 的层仍走显式 mask。
+_SDPA_CAUSAL = os.environ.get("ONETRANS_SDPA_CAUSAL", "0") == "1"
 # [E13] attention 掩码缓存（同形状只算一次；掩码与权重/激活无关 ⇒ 逐位等价）
 _MASK_CACHE_ENABLE = os.environ.get("ONETRANS_MASK_CACHE", "0") == "1"
 _MASK_CACHE: dict = {}
@@ -256,7 +259,8 @@ class CausalMaskAttention(nn.Module):
         v = self.split_heads(v)
 
         attention_mask = None
-        if self.if_mask:
+        _builtin_causal = _SDPA_CAUSAL and self.if_mask and seq_len_q == seq_len_k and self.mask_type == "paper_causal"
+        if self.if_mask and not _builtin_causal:
             attention_mask = self.create_attention_mask(
                 seq_len_q, seq_len_k, device=q.device, dtype=q.dtype
             )
@@ -268,7 +272,7 @@ class CausalMaskAttention(nn.Module):
             v,
             attn_mask=attention_mask,
             dropout_p=0.0,
-            is_causal=False,
+            is_causal=_builtin_causal,
         )
         output = output.transpose(1, 2).contiguous()
         output = output.view(output.size(0), -1, self.d_model)
