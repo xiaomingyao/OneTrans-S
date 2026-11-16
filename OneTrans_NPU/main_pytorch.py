@@ -20,6 +20,10 @@ _CKPT_SCOPE = os.environ.get("ONETRANS_CKPT_SCOPE", "all").lower()
 _FUSED_NORM = os.environ.get("ONETRANS_FUSED_NORM", "0") == "1"
 # [E7] _project_one 的 seq/ns 合并：cat → 预分配 + 原地写入（逐位等价，只改内存写路径）
 _CAT_INPLACE = os.environ.get("ONETRANS_CAT_INPLACE", "0") == "1"
+# [G2] 全量投影 + 原地覆盖 NS 行：省掉「seq/ns 两路算完再 alloc+2 写」的那次整块合并。
+# 语义：NS 的 12 行先用共享权重算一遍（多算 12/L ≈1% 算力），随后被独立权的结果整行覆盖 ⇒ 前向逐位不变。
+_FULL_PROJ = os.environ.get("ONETRANS_FULL_PROJ", "0") == "1"
+
 # [G1] query_len == key_len 的层用 SDPA 内置 is_causal（无掩码张量）。
 # 只有在这种层里「底右对齐」与「左上对齐」是同一个掩码 ⇒ 逐位等价；q<k 的层仍走显式 mask。
 _SDPA_CAUSAL = os.environ.get("ONETRANS_SDPA_CAUSAL", "0") == "1"
@@ -218,6 +222,16 @@ class CausalMaskAttention(nn.Module):
     def _project_one(self, x: torch.Tensor, proj_idx: int) -> torch.Tensor:
         seq_len = x.size(1) - self.ns_len
         shared_group_idx = self.ns_len
+        if self.use_bmm and _FULL_PROJ and self.ns_len > 0 and seq_len > 0:
+            # [G2] 全量投影（NS 行先用共享权重占位），再把 NS 那几行整块覆盖成独立权重的结果。
+            # 不用额外缓冲、不做 cat：省掉每个投影一次整块 alloc + 一次全量写。
+            out = self._cal_kqv(x, shared_group_idx, proj_idx)
+            ns_in = x[:, seq_len:, :].permute(1, 0, 2)                          # (ns, B, d)
+            w = _wget(self.kqv_w, ("nsT", proj_idx),
+                      lambda: self.kqv_w[: self.ns_len, proj_idx].transpose(1, 2))
+            b = self.kqv_b[: self.ns_len, proj_idx].unsqueeze(1)
+            out[:, seq_len:, :] = (torch.bmm(ns_in, w) + b).permute(1, 0, 2)
+            return out
         if self.use_bmm:
             parts = []
             if seq_len > 0:
@@ -341,6 +355,17 @@ class OneTransBlock(nn.Module):
 
     def cal_mix_param_ffn(self, x: torch.Tensor) -> torch.Tensor:
         seq_len = x.size(1) - self.ns_len
+        if self.use_bmm and _FULL_PROJ and self.ns_len > 0 and seq_len > 0:
+            # [G2] 同 _project_one：全量 FFN，再把 NS 行覆盖成独立权重的结果
+            out = self._ffn_one(x, self.ns_len)
+            ns_in = x[:, seq_len:, :].permute(1, 0, 2)
+            h = torch.nn.functional.silu(
+                torch.bmm(ns_in, _wget(self.ffn_w1, ("nsT",), lambda: self.ffn_w1[: self.ns_len].transpose(1, 2)))
+                + self.ffn_b1[: self.ns_len].unsqueeze(1))
+            o = torch.bmm(h, _wget(self.ffn_w2, ("nsT",), lambda: self.ffn_w2[: self.ns_len].transpose(1, 2))) \
+                + self.ffn_b2[: self.ns_len].unsqueeze(1)
+            out[:, seq_len:, :] = torch.nn.functional.silu(o).permute(1, 0, 2)
+            return out
         res = []
         if seq_len > 0:
             res.append(self._ffn_one(x[:, :seq_len, :], self.ns_len))
@@ -367,7 +392,7 @@ class OneTransBlock(nn.Module):
         x = self.rms_0(x)
         k_x, q_x, v_x = x, x, x
         if self.pyramid_stack_len is not None and self.pyramid_stack_len >= self.ns_len:
-            q_x = x[:, -self.pyramid_stack_len :, :]
+            q_x = x.narrow(1, x.size(1) - self.pyramid_stack_len, self.pyramid_stack_len)
         origin_x = q_x
         x = self.cma((k_x, q_x, v_x))
         return origin_x + x

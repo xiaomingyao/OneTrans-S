@@ -277,3 +277,9 @@ torch.OutOfMemoryError: NPU out of memory. Tried to allocate 2.34 GiB (NPU 0; 91
 # 实测 atten_mask=None 时 sparse_mode=2/3 被忽略: B512 Lq480 Lk1203 下输出与「无 mask 全注意力」逐位相同(0.000e+00)
 # Lq==Lk 同样与无 mask 相同 ⇒ 无法用内置 causal 省 q<k 层的 mask; G1(q==k) 已是全部可得收益
 # 复现注意: 关键字是 atten_mask(不是 attn_mask)
+
+## G2 全量投影 + 原地覆盖 NS 行（ONETRANS_FULL_PROJ=1）—— 单卡 -11.0%，16 卡无效
+# 单 die batch1024: 421.2 → 374.9 ms (-11.0%)
+# 16 die 档B: baseline 847.5 (复测) vs 847.3 (-0.02%); 档A: 1053.5 vs 1053.8 (+0.03%)
+# 精度(单die 2步 81参数全梯度): loss rel<=9e-5; max|Δg|=4.88e-4 = 最大梯度(0.154)的 1 bf16 ULP; 中位数 7.6e-6 ⇒ 布局类噪声级等价
+# 教训: 内存/布局类收益不能由单 die 外推 16 卡(被 cube 41.6% 与 HCCL 掩盖); 收益判定只在 16 卡做
