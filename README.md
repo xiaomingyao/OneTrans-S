@@ -274,6 +274,28 @@ loss 与全部 41 个参数梯度**逐位相同（rel = 0）**。
 **结论：判无效（默认关）。** 教训：**1 卡能省的时间不一定在 16 卡上省** —— 单 die 上这些合并/拷贝落在关键路径，
 16 卡上被 cube（41.6%）与 HCCL 掩盖；此后所有收益判定只在 16 卡上做，单卡只用于精度与单算子耗时。
 
+### 3.10 第七步：attention 走 FA 的 `BSH` 布局（`ONETRANS_FA_BSH=1`，**单卡 −2.7%、16 卡无效**）
+
+`npu_fusion_attention` 支持 `input_layout="BSH"`：输入 `(B,L,d)`、输出也是 `(B,L,d)` 连续，可以省掉
+`output.transpose(1,2).contiguous()` 这次整张量往返，以及 FA 内部的部分转置。
+
+| 场景 | baseline | BSH | Δ |
+|---|---:|---:|---:|
+| 单算子 fwd（B512·H4·Lq480·Lk1203） | 2.215 ms | **1.513 ms** | **−31.7%** |
+| 单 die · batch 1024 | 421.1 ms | **409.8 ms** | **−2.7%** |
+| 16 die · 档 B | 847.3 ms | 847.3 ms | **0.00%** |
+| 16 die · 档 A | 1,053.5 ms | 1,054.0 ms | +0.05% |
+
+精度：单算子前向 **逐位相同（max|Δ| = 0.0）**、`dk/dv` 逐位、`dq` 1 ULP；模型级 2 步 `max|Δg| = 2.44e-4`
+（最大梯度 0.154 的 0.5 ULP），worst rel 7.6e-3（|g|≥1e-2 上 1,307 个元素）⇒ 噪声级等价。
+
+两个必须知道的坑：
+1. **`atten_mask` 语义是「True = 屏蔽」**，与 SDPA 相反；传反了不报错但结果全错（max|Δ| 4.53）。
+2. `Lq == ns_len` 的最后一层（12 行）q 是 **fp32 且非连续**（bmm + fp32 bias 的 type-promotion），FA 直接报
+   `161002` ⇒ BSH 分支要限定 `ns_len < Lq < Lk and q.is_contiguous() and q.dtype==k.dtype`，那层留在 SDPA 上。
+
+**结论：判无效（默认关）。** 与 §3.9 同一个教训：16 卡上这些拷贝被掩盖，**单卡收益不外推**。
+
 ## 4. 与论文 H100 对比（按**全局 batch = 32,768** 对齐）
 
 > 主对比档已叠加 `ONETRANS_NS_BMM=1`（从 zeus-onetrans 移植的 ns-layout 优化，数学等价、UT 通过；逐项判定见 `docs/OPT_PORT_FROM_ZEUS.md`，实测见 §3.3）。

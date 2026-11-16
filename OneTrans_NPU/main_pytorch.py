@@ -20,6 +20,12 @@ _CKPT_SCOPE = os.environ.get("ONETRANS_CKPT_SCOPE", "all").lower()
 _FUSED_NORM = os.environ.get("ONETRANS_FUSED_NORM", "0") == "1"
 # [E7] _project_one 的 seq/ns 合并：cat → 预分配 + 原地写入（逐位等价，只改内存写路径）
 _CAT_INPLACE = os.environ.get("ONETRANS_CAT_INPLACE", "0") == "1"
+# [G3] attention 走 FA 的 BSH 布局：输入 (B,L,d)、输出也是 (B,L,d)，省掉 transpose(1,2)+contiguous 那次整张量往返。
+# 只用在 q_len != key_len 的层（q==k 的层继续用 G1 的无掩码 is_causal，掩码反而更慢）。
+# 注意 FA 的 atten_mask 语义是「True = 屏蔽」，与 SDPA 的「True = 保留」相反。
+_FA_BSH = os.environ.get("ONETRANS_FA_BSH", "0") == "1"
+_FA_BLOCKED_MASK = {}      # (q_len, k_len) -> bool 掩码，True = 屏蔽
+
 # [G2] 全量投影 + 原地覆盖 NS 行：省掉「seq/ns 两路算完再 alloc+2 写」的那次整块合并。
 # 语义：NS 的 12 行先用共享权重算一遍（多算 12/L ≈1% 算力），随后被独立权的结果整行覆盖 ⇒ 前向逐位不变。
 _FULL_PROJ = os.environ.get("ONETRANS_FULL_PROJ", "0") == "1"
@@ -161,6 +167,17 @@ class CausalMaskAttention(nn.Module):
         x = x.view(batch_size, seq_len, self.num_heads, self.depth)
         return x.transpose(1, 2)
 
+    def create_blocked_mask(self, query_len: int, key_len: int, device: torch.device) -> torch.Tensor:
+        """[G3] FA 用的掩码：True = 屏蔽（底右对齐因果被屏蔽的部分）。只依赖形状 ⇒ 可缓存。"""
+        key = (query_len, key_len, str(device))
+        hit = _FA_BLOCKED_MASK.get(key)
+        if hit is None:
+            row_idx = torch.arange(query_len, device=device).unsqueeze(1)
+            col_idx = torch.arange(key_len, device=device).unsqueeze(0)
+            hit = col_idx > (row_idx + (key_len - query_len))
+            _FA_BLOCKED_MASK[key] = hit
+        return hit
+
     def create_attention_mask(self, query_len: int, key_len: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
         """[E13] 掩码缓存：同形状（每步都一样）只算一次。
 
@@ -268,6 +285,20 @@ class CausalMaskAttention(nn.Module):
         seq_len_q = x[1].size(1)
 
         k, q, v = self.cal_mix_param_kqv(x)
+
+        # 条件里的 seq_len_q > ns_len / dtype / contiguity 是必需的：Lq == ns_len 的最后一层走的是纯 NS 路径，
+        # q 是 fp32 且非连续（bmm+fp32 bias 的 type-promotion），FA 会直接报 161002；那层只有 12 行，留在 SDPA 上更省事。
+        if (_FA_BSH and self.if_mask and self.ns_len < seq_len_q < seq_len_k
+                and q.is_contiguous() and q.dtype == k.dtype == v.dtype):
+            # [G3] q<k 的层：FA 的 BSH 布局，输入输出都是 (B, L, d) 连续张量 ⇒ 不需要 transpose+contiguous
+            import torch_npu  # noqa: PLC0415
+            blocked = self.create_blocked_mask(seq_len_q, seq_len_k, device=q.device)
+            out = torch_npu.npu_fusion_attention(
+                q, k, v, self.num_heads, "BSH", atten_mask=blocked,
+                scale=float(self.depth) ** -0.5, keep_prob=1.0, sparse_mode=1,
+            )[0]
+            return _lin(self.dense, out)
+
         k = self.split_heads(k)
         q = self.split_heads(q)
         v = self.split_heads(v)

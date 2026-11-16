@@ -283,3 +283,11 @@ torch.OutOfMemoryError: NPU out of memory. Tried to allocate 2.34 GiB (NPU 0; 91
 # 16 die 档B: baseline 847.5 (复测) vs 847.3 (-0.02%); 档A: 1053.5 vs 1053.8 (+0.03%)
 # 精度(单die 2步 81参数全梯度): loss rel<=9e-5; max|Δg|=4.88e-4 = 最大梯度(0.154)的 1 bf16 ULP; 中位数 7.6e-6 ⇒ 布局类噪声级等价
 # 教训: 内存/布局类收益不能由单 die 外推 16 卡(被 cube 41.6% 与 HCCL 掩盖); 收益判定只在 16 卡做
+
+## G3 FA BSH 布局（ONETRANS_FA_BSH=1）—— 单卡 -2.7%，16 卡无效
+# 单算子 fwd (B512 H4 Lq480 Lk1203): 2.215 → 1.513 ms (-31.7%), 前向逐位相同(0.0), dk/dv 逐位, dq 1ULP
+# 单 die batch1024: 421.1 → 409.8 ms (-2.7%)
+# 16 die: 档B 847.3 → 847.3 (0.00%); 档A 1053.5 → 1054.0 (+0.05%)
+# 精度(模型级2步): max|Δg|=2.44e-4 (最大梯度0.154的0.5ULP), worst rel 7.6e-3(|g|>=1e-2, 1307元素)
+# 坑: FA atten_mask 语义=True屏蔽(与SDPA反), 传反不报错但全错; Lq==ns_len 层 q 为 fp32 非连续 ⇒ 161002, 该层留 SDPA
+# 结论: 无效默认关. 连续两项(G2/G3)单卡有收益16卡为零 ⇒ 16卡墙钟不由这些 kernel 决定, 需换诊断方向
