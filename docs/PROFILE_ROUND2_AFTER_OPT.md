@@ -120,6 +120,22 @@ E14 的细节值得留档：`npu_add_rms_norm` 返回三元组 `(y, rstd, x_sum)
 
 ⇒ 路线 A 在这套软件栈上**不是「调个开关」能拿到的**：要可用图模式，需要先把步内算子改成可捕获（FA/HCCL 的内部 stream、capture 期内存池），属专项工程。
 
+## 5.3 低风险候选 (a)：FA 内置 causal 覆盖 `q<k` 的层 —— 不可行
+
+动机：G1 只覆盖了 `q_len == key_len` 的 2 个 block；剩余 5 个 `q<k` 的 block 仍在建整张 bool mask。
+想法：直接调 `torch_npu.npu_fusion_attention(..., sparse_mode=3)`（右下对齐三角）绕开 mask 张量。
+
+实测（`tools/probes/probe_fa_sparse_mode.py`，B512·H4·Lq480·Lk1203·D64·bf16）：
+
+| 调用 | vs 底右 mask | vs 左上 mask | vs **无 mask** |
+|---|---:|---:|---:|
+| `sparse_mode=2` | 3.2e-1 | 3.2e+0 | **0.000** |
+| `sparse_mode=3` | 3.2e-1 | 3.2e+0 | **0.000** |
+
+`Lq==Lk` 时同样与「无 mask」逐位相同 ⇒ **`atten_mask=None` 时 `sparse_mode` 被忽略**，算子退化成全注意力。
+所以「用内置 causal 省掉 `q<k` 层的掩码」这条路不通；G1 已经是这条思路能拿到的全部（`q==k` 层，−5.1%）。
+（复现要点：关键字是 `atten_mask`，不是 `attn_mask`；后者会直接报 `Unknown keyword argument`。）
+
 ## 6 可优化方向（按 收益 ÷ 风险 排序）
 
 | # | 方向 | 证据 | 预计收益 | 风险 |

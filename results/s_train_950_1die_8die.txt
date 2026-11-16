@@ -272,3 +272,8 @@ torch.OutOfMemoryError: NPU out of memory. Tried to allocate 2.34 GiB (NPU 0; 91
 # 单次耗时(非 blocking): 现有 add+npu_rms_norm fwd 1.450 ms vs Triton 1.527 ms (+5.3%); bwd 2.915 vs 2.888 (−0.9%)
 # 结论: Triton 融合这条 2-op 链与厂商融合算子打平(前向更慢) ⇒ h 项在当前链路上无效, 不集成
 # 原因: baseline 已在 ~1.7 TB/s (HBM 上限附近), 合并两步只省一次 0.63GB 往返(≈0.4ms), Triton 无调度优势
+
+## (a) FA sparse_mode 覆盖 q<k 层 —— 不可行
+# 实测 atten_mask=None 时 sparse_mode=2/3 被忽略: B512 Lq480 Lk1203 下输出与「无 mask 全注意力」逐位相同(0.000e+00)
+# Lq==Lk 同样与无 mask 相同 ⇒ 无法用内置 causal 省 q<k 层的 mask; G1(q==k) 已是全部可得收益
+# 复现注意: 关键字是 atten_mask(不是 attn_mask)
