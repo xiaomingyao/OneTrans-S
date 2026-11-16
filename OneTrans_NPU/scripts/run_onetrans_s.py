@@ -87,6 +87,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--out-json", type=Path, default=None)
     p.add_argument("--profile-dir", default=None, help="给了就在 rank0 上抓 profile（只在计时段，跳过 warmup）")
     p.add_argument("--profile-steps", type=int, default=2, help="抓几个稳态步")
+    p.add_argument("--profile-with-stack", action="store_true", help="记录调用栈（可按代码位置归因算子）")
     return p.parse_args()
 
 
@@ -164,6 +165,7 @@ def main() -> None:
         prof = torch_npu.profiler.profile(
             activities=[torch_npu.profiler.ProfilerActivity.NPU, torch_npu.profiler.ProfilerActivity.CPU],
             schedule=torch_npu.profiler.schedule(wait=args.warmup, warmup=0, active=args.profile_steps, repeat=1),
+            with_stack=bool(args.profile_with_stack),
             on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(str(args.profile_dir)),
         )
         prof.start()

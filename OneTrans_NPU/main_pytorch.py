@@ -12,6 +12,8 @@ _MASK_DTYPE = os.environ.get("ONETRANS_ATTN_MASK", "float").lower()
 
 VALID_MASK_TYPES = {"paper_causal", "origin", "hard_mask", "bimask_soft", "bimask_hard"}
 _SQRT5 = math.sqrt(5.0)
+# [E1a] norm 在 fp32 域内乘 weight，输出回 bf16（去掉 fp32 激活与下游重复 cast）。默认关。
+_RMS_FP32_OUT = os.environ.get("ONETRANS_RMS_DTYPE", "0") == "1"
 
 
 class FFNLayer(nn.Module):
@@ -49,6 +51,11 @@ class RMSNorm(nn.Module):
         input_dtype = x.dtype
         x_fp32 = x.float()
         rms = x_fp32.pow(2).mean(dim=-1, keepdim=True).add(self.eps).rsqrt()
+        if _RMS_FP32_OUT:
+            # E1a：weight(fp32) 在 fp32 域内乘掉，整个 norm 只做一次量化（→ x.dtype）。
+            # 原式 (x_fp32*rms).to(dtype) * weight 会把输出提升成 fp32，下游 linear 在 autocast 下再 cast 回 bf16
+            # ⇒ 每层多一次 fp32 激活与一次 Cast（profile: Cast 677 次/步、185.4 ms）。
+            return (x_fp32 * rms * self.weight).to(input_dtype)
         return (x_fp32 * rms).to(input_dtype) * self.weight
 
 

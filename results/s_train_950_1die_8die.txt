@@ -166,3 +166,14 @@ torch.OutOfMemoryError: NPU out of memory. Tried to allocate 2.34 GiB (NPU 0; 91
 # 折算: 每 1e6 样本 59.3 s → 44.0 s；日处理 1.458e9 → 1.961e9 样本
 # 三轮一致性: 16die(21:06) 1942.0→1442.9 = −25.7% / 8die(21:15) 1952.1→1442.3 = −26.1% / 本轮 1942.1→1443.4 = −25.7%
 # 与论文 407 ms 并列: 1443.4/407 = 3.55×（口径不同，只并列不相除算收益）
+
+## E1a：RMSNorm 输出 dtype 归位（weight 在 fp32 域内乘，输出回 bf16）—— 结论：无效
+# 改动: main_pytorch.RMSNorm.forward 加 ONETRANS_RMS_DTYPE=1 分支; 原式 (x_f32*rms).to(dtype)*weight → (x_f32*rms*weight).to(dtype)
+# UT (tools/probes/ut_rms_dtype_equiv.py, CPU): 现状 out=fp32 / max_rel_err_vs_fp64=3.888e-03, rms=1.659e-03
+#                                                E1a out=bf16 / max_rel_err=3.891e-03, rms=1.655e-03  ⇒ 精度无损失, dtype 归位确认
+# 16 die A/B（全局 32,768, n=8, 端口 29581/29583）
+[perf] A ns_bmm=1:              steady_median_step_ms=1443.3 global_sps=22704.1 mfu=10.36% hbm=52.27 GB
+[perf] B ns_bmm=1 + rms_dtype:  steady_median_step_ms=1443.7 global_sps=22697.4 mfu=10.35% hbm=52.27 GB
+# Δ = +0.03%（在抖动内，判「无效」）；loss 轨迹几乎一致（step7 0.70894 vs 0.70789 = 0.15%，step9 0.72375 vs 0.72374）
+# 自纠: 方案里 E1a 预估 30~60 ms 过高 —— 归因错在「把 Cast 185.4 ms 整桶都算到 norm dtype 头上」；
+#       norm 输出提升只对应 28 次 cast/步，而实测 Cast 是 677 次/步 ⇒ 大头在别处（待 with_stack profile 归因）
