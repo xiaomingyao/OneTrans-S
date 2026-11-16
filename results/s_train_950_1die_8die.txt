@@ -69,3 +69,26 @@ torch.OutOfMemoryError: NPU out of memory. Tried to allocate 2.34 GiB (NPU 0; 91
 ## 汇总（同 batch=2048 + 重算，1 die vs 8 die 同配置可比）
 # 1 die: 1901.8 ms / 1,076.9 sps；8 die: 1934.2 ms / 8,470.9 sps
 # 扩展比 = 8470.9 / 1076.9 = 7.87×（8 卡效率 98.3%）；每卡 sps 仅降 1.7% ⇒ 该形状下 DDP 梯度同步不是瓶颈
+
+## 全局 batch = 32,768（论文口径：16×H100 × per-GPU 2048）
+# 途经 1：8 die × 每卡 4096 单 micro-batch（+重算）→ OOM，不可行
+[rank2] torch.OutOfMemoryError: NPU out of memory. Tried to allocate 8.49 GiB (NPU 2; 91.75 GiB total capacity; 64.80 GiB already allocated; 3.55 GiB free; 86.64 GiB reserved in total by PyTorch).
+[rank6] torch.OutOfMemoryError: NPU out of memory. Tried to allocate 8.49 GiB (NPU 6; 91.75 GiB total capacity; 64.80 GiB already allocated; 3.56 GiB free; 86.64 GiB reserved in total by PyTorch).
+
+# 途经 2：8 die × micro 2048 × grad_accum 2 = 全局 32,768（每次优化器更新 32,768 样本）
+# 命令: torchrun --nproc_per_node=8 scripts/run_onetrans_s.py --batch-size 2048 --grad-accum 2 --checkpoint-act --flops-per-sample 31529400000
+[run] amp=True dtype=bf16 mask=paper_causal attn_mask_env=bool per_card_micro_batch=2048 grad_accum=2 per_card_batch=4096 global_batch=32768 ckpt_act=True
+[step 000] warm ms=  4712.4 loss=0.70026
+[step 001] warm ms=  3866.1 loss=1.31754
+[step 002] meas ms=  3865.7 loss=2.15028
+[step 003] meas ms=  3873.1 loss=1.66810
+[step 004] meas ms=  3872.4 loss=0.71584
+[step 005] meas ms=  3869.3 loss=0.72277
+[perf] steady_median_step_ms=3870.8 mean=3870.1 n=4 global_samples_per_s=8465.4 per_card_samples_per_s=1058.2
+[perf] hbm_peak_alloc_gb=52.95 flops_per_sample=31.529 GFLOP gflops_per_step(global)=1033155.4 mfu_vs_432TF=7.72%
+
+## 汇总（同一 8 die，只改全局 batch）
+# 全局 16,384（micro 2048 × accum 1）: 1934.2 ms / 8,470.9 sps
+# 全局 32,768（micro 2048 × accum 2）: 3870.8 ms / 8,465.4 sps
+# 步时比 = 2.001×，吞吐比 = 0.9994（−0.06%）⇒ 该形状每卡算力饱和，加全局 batch 只线性加时间、不涨吞吐
+# 与论文同全局 batch 并列（不相除）：论文 16×H100 407 ms/步、每卡 5,032 sps；本仓 8 die 3870.8 ms/步、每卡 1,058 sps

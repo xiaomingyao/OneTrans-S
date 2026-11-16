@@ -46,11 +46,12 @@ git -C GPU_Reference status --porcelain    # 空 = 未改动
 | 1 die | 1024（+激活重算） | 1024 | 966.4 ms | 1,059.6 | 1,059.6 | 26.64 GB | 7.73% |
 | **1 die** | **2048（+重算）** | 2,048 | **1,901.8 ms** | 1,076.9 | 1,076.9 | 51.96 GB | 7.86% |
 | **8 die** | **2048（+重算）** | 16,384 | **1,934.2 ms** | 1,058.9 | **8,470.9** | 52.30 GB | 7.73% |
+| **8 die** | 2048 × accum 2（+重算） | **32,768** | **3,870.8 ms** | 1,058.2 | **8,465.4** | 52.95 GB | 7.72% |
 
 三条实测结论：
 
-1. **每卡 batch=2048 必须开激活重算**：不开启直接 `NPU out of memory`（已分配 86.63 GiB、还需 2.34 GiB；单 die 91.75 GiB）。
-2. **吞吐在 batch ≥ 512 后进入平台**（每卡 1.06k–1.22k sps）：batch 256 时固定开销占比高，加 batch 只摊薄开销，算力利用率不涨。
+1. **显存是硬约束**：1 die 每卡 2048 不开激活重算直接 OOM（已分配 86.63 GiB、还需 2.34 GiB）；8 die 每卡 4096 即便开重算也 OOM（已分配 64.80 GiB、还需 8.49 GiB，单 die 91.75 GiB）⇒ 论文 per-GPU 2048 是这台机器的实际可达上沿，全局 32,768 只能靠 `--grad-accum 2`。
+2. **吞吐在 batch ≥ 512 后进入平台**（每卡 1.06k–1.22k sps）：batch 256 时固定开销占比高；把全局 batch 从 16,384 抬到 32,768 只把步时线性拉长 2.001×，吞吐 8,470.9 → 8,465.4（−0.06%）⇒ 该形状每卡算力已饱和。
 3. **8 卡扩展 7.87×（效率 98.3%）**，每卡 sps 仅降 1.7% ⇒ 该形状下 DDP 梯度同步**不是**瓶颈；瓶颈在单卡 kernel 效率（MFU 7.7–8.9%）。
 
 原始日志：`results/s_train_950_1die_8die.txt`（含每步 ms / loss / OOM 原始报错）。
@@ -61,11 +62,12 @@ git -C GPU_Reference status --porcelain    # 空 = 未改动
 |---|---|---|---|
 | 训练规模 | 16 × H100，data-parallel all-reduce | 8 die（950DT 1 die = 1 卡） | 卡数不同，禁换算 |
 | per-GPU batch | 2048 | 2048 | 同口径 |
-| 全局 batch | 32,768 | 16,384 | — |
-| 稳态步时 | **407 ms**（Table 4，未优化基线） | **1,901.8 ms**（1 die）/ 1,934.2 ms（8 die） | ⚠️ 论文那档是 **fp32 / 未优化**，本仓是 **bf16 + FlashAttention + 重算**，不同口径 |
-| 训练显存峰值 | 53.13 GB（同未优化档） | 51.96 / 52.30 GB | 数值接近但精度档不同，不作因果 |
-| 吞吐 | 论文未给（32,768 ÷ 0.407 s ≈ 80,511 sps，**推算**） | **8,470.9 sps**（8 die 实测） | 对外只引用实测值 |
-| MFU | **S 未给**；OneTransL 30.8%（bf16，Table 5）；DCNv2+DIN 13.4% | **7.73%–8.93%**（分母 432 TF；分子 CPU 探针 31.53 GFLOP/sample） | 峰值来源不同源；S 侧只能自测 |
+| 全局 batch | 32,768 | 16,384（8 die × 2048）/ **32,768（8 die × 2048 × accum 2）** | 后者与论文同全局 batch |
+| 稳态步时 | **407 ms**（Table 4，未优化基线） | **1,901.8 ms**（1 die·2048）/ 1,934.2 ms（8 die·16,384）/ **3,870.8 ms（8 die·32,768）** | ⚠️ 论文那档是 **fp32 / 未优化**，本仓是 **bf16 + FlashAttention + 重算**，不同口径 |
+| 每卡吞吐 | 5,032 sps（2048 ÷ 0.407 s，**推算**） | 1,058.2 sps（8 die·32,768 实测） | 同 per-GPU batch 2048 对齐后的绝对值，差 4.76× |
+| 训练显存峰值 | 53.13 GB（同未优化档） | 51.96 / 52.30 / 52.95 GB | 数值接近但精度档不同，不作因果 |
+| 吞吐（全局） | 论文未给（32,768 ÷ 0.407 s ≈ 80,511 sps，**推算**） | 8,470.9 sps（16,384）/ **8,465.4 sps（32,768）** | 对外只引用实测值 |
+| MFU | **S 未给**；OneTransL 30.8%（bf16，Table 5）；DCNv2+DIN 13.4% | **7.72%–8.93%**（分母 432 TF；分子 CPU 探针 31.53 GFLOP/sample） | 峰值来源不同源；S 侧只能自测 |
 
 三条引用纪律（详见 `docs/TOPIC_ONETRANS_S.md` §5）：① 跨平台不相除；② 论文 H100 那档是 fp32 未优化基线，不能与本仓 bf16 优化档直接比快慢，只能并列；③ 论文没给 S 的 bf16/MFU，「按 OneTransL 的 30.8% 推 S」属口径混用（本仓曾算错过一次，已在话题文档自纠）。
 
@@ -95,9 +97,14 @@ python3 scripts/run_onetrans_s.py --device npu --batch-size 2048 --steps 20 --wa
 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 torchrun --nproc_per_node=8 \
   scripts/run_onetrans_s.py --device npu --batch-size 2048 --steps 20 --warmup 5 \
   --checkpoint-act --flops-per-sample 31529400000 --out-json ../results/s_8die.json
+
+# 8 die 且全局 batch = 32,768（论文口径）：micro 2048 × accum 2
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 torchrun --nproc_per_node=8 \
+  scripts/run_onetrans_s.py --device npu --batch-size 2048 --grad-accum 2 --steps 20 --warmup 5 \
+  --checkpoint-act --flops-per-sample 31529400000 --out-json ../results/s_8die_g32768.json
 ```
 
-常用旋钮只有 `--batch-size / --steps / --checkpoint-act / --flops-per-sample` 四个；形状默认值就是论文 S，不要手改模型代码。
+常用旋钮只有 `--batch-size / --grad-accum / --steps / --checkpoint-act / --flops-per-sample` 五个；形状默认值就是论文 S，不要手改模型代码。
 判据：`[shape] params=91,026,946` ∧ `[shape] pyramid_schedule=[1203, 960, 736, 480, 256, 12]` ∧ `[perf] steady_median_step_ms` 有值 ∧ 退出码 0。
 
 ## 7. 迁移与精度验证（历史资产，仍然有效）
