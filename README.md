@@ -175,7 +175,27 @@ zeus-onetrans 的 8 项优化按本仓准入四条（数学等价 / loss-梯度�
 
 三条引用纪律（详见 `docs/TOPIC_ONETRANS_S.md` §5）：① 跨平台不相除；② 论文 H100 那档是 fp32 未优化基线，不能与本仓 bf16 优化档直接比快慢，只能并列；③ 论文没给 S 的 bf16/MFU，「按 OneTransL 的 30.8% 推 S」属口径混用（本仓曾算错过一次，已在话题文档自纠）。
 
-## 5. 已知差距：结构对账未闭合
+## 5. 16 卡 profiling：瓶颈在哪（2026-11-16，rank0 profile，3 个稳态步）
+
+完整分析见 **`docs/PROFILE_16DIE_BOTTLENECK.md`**，原始数据 `results/prof16_*.csv`，复算脚本 `tools/probes/analyze_profile.py`。
+
+| 事实 | 值 | 含义 |
+|---|---:|---|
+| compute kernel 并集占步时 | **99.8%**（1,440.6 / 1,443.2 ms） | 设备侧**没有空隙**（气泡仅 2.6 ms），不靠提并行度取胜 |
+| 通信（HCCL）并集 | 15.6 ms（1.08%），69% 被计算掩盖 | **通信不是瓶颈**，净暴露 ≈4.8 ms（0.33%） |
+| kernel 数 | **3,083 个/步**，中位 15.9 µs，52% <20 µs | 碎片化，下发间隙直接落在关键路径 |
+| cube 类（FA+MatMul） | 484.2 ms（33.1%），同口径理论 149.5 ms | **cube 内效率 30.9%** |
+| 非 cube（vector+layout+comm） | **978.6 ms（66.9%）** | 三分之二时间不在矩阵乘上 |
+
+构成（ms/步）：`vector 逐元素 443.9（30.3%）` / `FA 融合 270.8（18.5%）` / `MatMul 213.4（14.6%）` /
+`Cast 185.4（12.7%，677 次）` / `切片拷贝 146.5（10.0%）` / `转置 78.0（5.3%）` / `拼接 52.1（3.6%）` / `归约 45.6（3.1%）` / `通信 15.7（1.1%）`。
+
+**四条瓶颈（按可动性排序）**：① layout 搬运占 32%（Cast 677 次/步 + pyramid 切片/拼接/转置）；
+② cube 内只跑 30.9%（FA 前向 14 次/步 = 7 block × 激活重算的二次前向）；③ 手写 RMSNorm 链 `Square 27.9 + Pow 14.4` 共 42.6 ms/步，
+而容器内已有 `npu_add_rms_norm`/`npu_rms_norm_backward` 融合算子未用；④ kernel 碎片 3,083 个/步。
+可动候选与预估收益见该文档 §4（第 1 项融合 RMSNorm 预估 60~80 ms/步，需 UT 验等价后再合）。
+
+## 6. 已知差距：结构对账未闭合
 
 | 判据 | 论文 | 本仓 | 结论 |
 |---|---|---|---|
@@ -185,7 +205,7 @@ zeus-onetrans 的 8 项优化按本仓准入四条（数学等价 / loss-梯度�
 
 ⇒ 现阶段只能宣称「**同形状**的 OneTrans 训练」，不能宣称「= 论文 OneTrans-S」。复现脚本：`tools/probes/`（参数量 / 每样本 FLOPs / pyramid 比值，CPU 可跑）。
 
-## 6. 训练入口
+## 7. 训练入口
 
 ```bash
 cd OneTrans_NPU
@@ -211,7 +231,7 @@ ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 torchrun --nproc_per_node=8 \
 常用旋钮只有 `--batch-size / --grad-accum / --steps / --checkpoint-act / --flops-per-sample` 五个；形状默认值就是论文 S，不要手改模型代码。
 判据：`[shape] params=91,026,946` ∧ `[shape] pyramid_schedule=[1203, 960, 736, 480, 256, 12]` ∧ `[perf] steady_median_step_ms` 有值 ∧ 退出码 0。
 
-## 7. 迁移与精度验证（历史资产，仍然有效）
+## 8. 迁移与精度验证（历史资产，仍然有效）
 
 接线改动只在 `npu_compat.py` + 两个入口脚本，`models/*`、`utils/*` 零改动（上游 submodule 亦零改动）；触碰上游 2 文件 147 行，占 1,233 行活跃 Python 的 11.9%。逐项对照 →
 [`docs/GPU_VS_NPU_CODE_IMPLEMENTATION.md`](docs/GPU_VS_NPU_CODE_IMPLEMENTATION.md)、[`docs/MIGRATION.md`](docs/MIGRATION.md)、[`patches/npu_changes.diff`](patches/npu_changes.diff)。
@@ -228,7 +248,7 @@ ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 torchrun --nproc_per_node=8 \
 
 > ⚠️ 环境差异：以上历史验证跑在 **torch 2.7.1+cpu / torch_npu 2.7.1.post4 / Python 3.11**（`/opt/buildtools/torch_v2_pt2.7.1`，SoC `Ascend950DT` V120 板卡 `IT23HMDB_D2`、CANN 9.1.0）下；§3 的 S 复核跑在同一节点另一容器（**torch 2.10.0+cpu / torch_npu 2.10.0 / Python 3.12**）。两套数字各自绑定自己的环境，**不跨环境比较**。toy 配置下的功能/多卡历史结果（冒烟 76.9 ms、mask kernel 3.77×、DDP `worst rel|Δg|=1.21e-06`、1/2/4/8 die 扩展 4.44×）见 `results/` 与 `docs/MIGRATION.md`。
 
-## 8. 目录
+## 9. 目录
 
 | 目录 | 内容 |
 |---|---|
@@ -240,7 +260,7 @@ ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 torchrun --nproc_per_node=8 \
 | `results/` | 实测日志（每行可追溯到命令与环境） |
 | `patches/` | 完整改动 diff |
 
-## 9. 快速开始（历史探针）
+## 10. 快速开始（历史探针）
 
 ```bash
 # 冒烟（前向 + 反向 + 3 步）

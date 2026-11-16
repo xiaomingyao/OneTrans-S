@@ -1,0 +1,36 @@
+# 16 die（122+111，全局 32,768，每卡 2048，ns_bmm=1）rank0 profile，3 个稳态步（Step Id 2/3/4）
+# 源: results/prof16_kernel_details.csv  step 实测 1443.2 ms（同进程非 profile 窗口 steady_median=1443.7）
+
+类别                               ms/步       占比   kernel/步    其中<20us
+vector·逐元素                      443.9    30.3%        838        55%
+cube·FA 融合(含其附属转置)              270.8    18.5%         28         4%
+cube·MatMul                     213.4    14.6%        306        30%
+layout·Cast                     185.4    12.7%        726        66%
+layout·切片/拷贝                    146.5    10.0%        496        66%
+layout·转置                        78.0     5.3%        257        27%
+layout·拼接                        52.1     3.6%         47         0%
+vector·归约                        45.6     3.1%        157        38%
+comm                             15.7     1.1%         13         0%
+other                            11.3     0.8%        213        58%
+norm 融合                           0.0     0.0%          2        50%
+合计                             1462.9   100.0%       3083
+
+cube 类合计 484.2 ms/步（33.1%）；同口径理论 cube 时间 149.5 ms/步（64.57 TFLOP ÷ 432 TF）⇒ cube 内效率 30.9%
+非 cube 类合计 978.6 ms/步 = 66.9% 的步时
+
+# 单算子 TOP15（ms/步）
+  aclnnFlashAttentionScoreGradV4_FlashAttentionScoreGrad_FlashAt    158.8  n/步=   7
+  aclnnMul_MulAiCore_Mul                                            151.6  n/步= 140
+  aclnnInplaceCopy_CastAiCore_Cast                                  143.6  n/步= 677
+  aclnnAdd_AddAiCore_Add                                            130.8  n/步= 251
+  aclnnFlashAttentionScoreV4_FlashAttentionScore_FlashAttentionS    108.1  n/步=  14
+  aclnnMm_MatMulV3Common_MatMulV3                                   106.2  n/步=  84
+  aclnnAddmm_MatMulV3Common_MatMulV3                                102.8  n/步=  82
+  aclnnInplaceCopy_SliceAiCore_Slice                                 84.2  n/步= 122
+  aclnnInplaceCopy_TransposeAiCore_Transpose                         77.0  n/步= 211
+  aclnnCat_ConcatD_ConcatD                                           52.1  n/步=  47
+  aclnnSilu_SiluAiCore_Swish                                         45.1  n/步=  46
+  aclnnCat_CastAiCore_Cast                                           41.8  n/步=  48
+  aclnnSiluBackward_SiluGradAiCore_SiluGrad                          34.4  n/步=  27
+  aclnnInplaceCopy_ViewCopyAiCore_ViewCopy                           32.9  n/步=  99
+  aclnnReduceSum_ReduceSumOpAiCore_ReduceSum                         32.2  n/步= 107

@@ -85,6 +85,8 @@ def parse_args() -> argparse.Namespace:
                    help="每样本训练 FLOPs（来自 tools/probes/flops_paper_shape.py，0 表示不算 MFU）")
     p.add_argument("--peak-tflops", type=float, default=432.0, help="单 die Cube bf16 峰值（950DT 真机 32 核×1650MHz）")
     p.add_argument("--out-json", type=Path, default=None)
+    p.add_argument("--profile-dir", default=None, help="给了就在 rank0 上抓 profile（只在计时段，跳过 warmup）")
+    p.add_argument("--profile-steps", type=int, default=2, help="抓几个稳态步")
     return p.parse_args()
 
 
@@ -156,6 +158,17 @@ def main() -> None:
     step_ms: list[float] = []
     loss_item = 0.0
 
+    prof = None
+    if args.profile_dir and rank == 0:
+        import torch_npu  # noqa: PLC0415  仅 NPU 侧需要
+        prof = torch_npu.profiler.profile(
+            activities=[torch_npu.profiler.ProfilerActivity.NPU, torch_npu.profiler.ProfilerActivity.CPU],
+            schedule=torch_npu.profiler.schedule(wait=args.warmup, warmup=0, active=args.profile_steps, repeat=1),
+            on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(str(args.profile_dir)),
+        )
+        prof.start()
+        log(f"[prof] rank0 profile_dir={args.profile_dir} active_steps={args.profile_steps}")
+
     for i in range(args.warmup + args.steps):
         if device_type == "npu":
             torch.npu.synchronize()
@@ -182,6 +195,12 @@ def main() -> None:
         if i >= args.warmup:
             step_ms.append(dt)
         log(f"[step {i:03d}] {'warm' if i < args.warmup else 'meas'} ms={dt:8.1f} loss={loss_item:.5f}")
+        if prof is not None:
+            prof.step()
+
+    if prof is not None:
+        prof.stop()
+        log("[prof] stop")
 
     med = statistics.median(step_ms)
     gbs = args.batch_size * world_size * args.grad_accum
