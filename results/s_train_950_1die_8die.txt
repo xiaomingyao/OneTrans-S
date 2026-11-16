@@ -108,3 +108,27 @@ torch.OutOfMemoryError: NPU out of memory. Tried to allocate 2.34 GiB (NPU 0; 91
 #       而是 FA 反向（FlashAttentionScoreGradV4）自己的 workspace。全局 32,768 只能用 --grad-accum 2。
 # 附：分块 FFN 的数值口径（ONETRANS_FFN_CHUNK 数学逐元素等价，但 bf16 非逐位一致）
 #     b256 两步 loss：no-chunk 0.68401 / 1.74561 ；chunk=131072 0.68401 / 1.74525（相对差 2.1e-4）
+
+## 16 die（122 + 111）× per-card 2048 = 全局 32,768（一次前向，不累积）
+# 拓扑：122=192.168.0.82（容器 zeus-950-v2） + 111=192.168.0.48（容器 zeus-950），各 8 die
+# 命令：两端各一条，MASTER_ADDR=192.168.0.82 MASTER_PORT=29517，node_rank=0/1
+#   torchrun --nnodes=2 --node_rank=N --nproc_per_node=8 --master_addr=192.168.0.82 --master_port=29517 \
+#     scripts/run_onetrans_s.py --device npu --batch-size 2048 --steps 4 --warmup 2 --checkpoint-act --flops-per-sample 31529400000
+# 前置判据（已核）：两机 torch 2.10.0+cpu / torch_npu 2.10.0 / 容器设备数 8（+davinci_manager）/ 8 die 全空 /
+#                   代码 md5 两端一致（run_onetrans_s.py 42c30608…、main_pytorch.py 28d13506…）/ 内网双向 0.2–0.3 ms
+[env] {'device_type': 'npu', 'torch': '2.10.0+cpu', 'torch_npu': '2.10.0', 'soc': 'Ascend950DT_9582'} dist=world_size=16 rank=0 local_rank=0
+[run] amp=True input_dtype=torch.float32 dtype=bf16 mask=paper_causal attn_mask_env=bool per_card_micro_batch=2048 grad_accum=1 per_card_batch=2048 global_batch=32768 ckpt_act=True
+[step 000] warm ms=  2894.2 loss=0.69808
+[step 001] warm ms=  2014.8 loss=1.26829
+[step 002] meas ms=  1940.6 loss=2.27384
+[step 003] meas ms=  1944.5 loss=1.07215
+[step 004] meas ms=  1940.8 loss=0.93277
+[step 005] meas ms=  1943.3 loss=0.73637
+[perf] steady_median_step_ms=1942.0 mean=1942.3 n=4 global_samples_per_s=16873.0 per_card_samples_per_s=1054.6
+[perf] hbm_peak_alloc_gb=52.30 flops_per_sample=31.529 GFLOP gflops_per_step(global)=1033155.4 mfu_vs_432TF=7.70%
+
+## 同全局 batch=32,768 的两种实现方式对照（都是 950DT，口径一致）
+# 8 die × 2048 × accum2 : 3870.8 ms / 8,465.4 sps / 每卡 1058.2
+# 16 die × 2048         : 1942.0 ms / 16,873.0 sps / 每卡 1054.6
+# 卡数 ×2 ⇒ 吞吐 1.993×（跨机扩展效率 99.7%），步时 0.502×，每卡吞吐 −0.34%
+# ⇒ 跨机 UB allreduce 在该形状下不是瓶颈（梯度量 91 M 参数 ≈ 364 MB/步）
