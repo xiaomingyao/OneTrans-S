@@ -153,9 +153,16 @@ def main() -> None:
     seq = torch.randn(n_local, args.seq_len, args.seq_feat_dim, generator=gen).to(args.device, dtype=in_dtype)
     labels = torch.randint(0, args.num_classes, (n_local,), generator=gen).to(args.device)
 
+    # [D2a] 梯度桶直视图：省掉 DDP 把 bucket 再拷回 param.grad 的那一步（profile 里 InplaceAdd/copy 的一部分）
+    _bucket_view = os.environ.get("ONETRANS_DDP_BUCKET_VIEW", "0") == "1"
+    # [D5-lite] NPU JIT 图编译模式：让后端把相邻逐元素算子融合、摊薄 launch
+    if os.environ.get("ONETRANS_JIT_COMPILE", "0") == "1" and device_type == "npu":
+        torch.npu.set_compile_mode(jit_compile=True)
+        log("[run] jit_compile=True（NPU 图编译融合）")
     model = nn.parallel.DistributedDataParallel(
         model, device_ids=[local_rank] if device_type == "npu" else None,
         find_unused_parameters=not args.ddp_strict, broadcast_buffers=False,
+        gradient_as_bucket_view=_bucket_view,
     ) if world_size > 1 else model
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)

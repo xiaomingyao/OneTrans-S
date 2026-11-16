@@ -243,3 +243,9 @@ torch.OutOfMemoryError: NPU out of memory. Tried to allocate 2.34 GiB (NPU 0; 91
 # op级: InplaceCopy 173.5 | InplaceAdd 67.8 | select 64.4 | ToCopyBwd 64.1 | BatchMatMul 45.3 | InplaceZero 40.0 | TransposeBwd 36.9 | slice 34.0 | SliceBwd 32.2
 # 碎片化: >=200us 占28.2%数量/76.7%时间; <20us 占14.9%数量/0.8%时间 ⇒ 不是kernel太碎
 # E13 掩码缓存: 档A 1111.7(-0.04%) / 档B 892.2(-0.03%) ⇒ 无效(默认关)
+
+## D1/D2/D5-lite 三项验证（16die 档B 基线 892.5ms）
+# E14 npu_add_rms_norm: 前向可用但该 torch_npu 版本无 autograd kernel ⇒ dW/dX 全 None(静默错梯度); 前向 rel 8.8e-3(bf16 域算 RMS, 比 fp32 域差一量级) ⇒ 不可用
+# E15a DDP gradient_as_bucket_view=True: 891.2ms (-0.15%) ⇒ 无效
+# E15b torch.npu.set_compile_mode(jit_compile=True): 892.6ms (+0.01%) ⇒ 无效
+# 说明: 本仓无 clip_grad_norm_, ReduceSum/Muls 并非 grad-clip; 小改动连续 6 次无效(掩码缓存/权重影子/input bf16/ddp-strict/bucket view/jit) ⇒ 剩余只在大张量搬运+cube 效率

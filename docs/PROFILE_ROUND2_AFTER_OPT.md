@@ -89,15 +89,26 @@ kernel 数：档 A 2,862/步、档 B 4,534/步（多一遍 micro-batch 的 eleme
 **共同教训**：这三项都是从「kernel 数量 / 小 kernel 太多」出发的，而实测 <20 µs 的 kernel 只占 0.8% 时间、掩码类 arange 只值 12 ms。
 **瓶颈在「大张量的搬运与格式转换」和「cube 内效率」，不在小算子数量。**
 
+## 5.1 按 §6 的清单又验了 3 项（结论：全部不可用）
+
+| 编号 | 对应方向 | 做法 | 结果 | 判定 |
+|---|---|---|---|---|
+| E14 | D1 融合残差加 + rms_norm | `torch_npu.npu_add_rms_norm(x1, x2, w, eps)` | **该版本 torch_npu 没有注册 autograd kernel**：前向可用，但 dW/dX 全是 `None`（只报 warning，静默错梯度） | **不可用（危险）** |
+| E15a | D2 grad/桶拷贝 | DDP `gradient_as_bucket_view=True` | 档 B 891.2 vs 892.5（−0.15%，抖动内） | 无效 |
+| E15b | D5 图编译（轻量版） | `torch.npu.set_compile_mode(jit_compile=True)` | 档 B 892.6 vs 892.5（+0.01%） | 无效 |
+
+E14 的细节值得留档：`npu_add_rms_norm` 返回三元组 `(y, rstd, x_sum)`，前向与 `npu_rms_norm(a1+a2)` 相比 max rel 8.8e-3（说明它的 RMS 在 bf16 域内算，比现在的 fp32 域差一个量级），
+且反传三个输入梯度全为 `None`——**如果只在训练脚本里"顺手"换上去，loss 会照常下降但梯度是错的**，属必须避免的坑。
+
 ## 6 可优化方向（按 收益 ÷ 风险 排序）
 
 | # | 方向 | 证据 | 预计收益 | 风险 |
 |---|---|---|---:|---|
-| **D1** | **融合残差加 + rms_norm**（`torch_npu.npu_add_rms_norm`） | `Add` 101.3 ms/471 次，其中全序列残差加 8 次/步 ≈ 20 ms | **−20 ms（2.2%）** | 低（与 E1b 同类，逐位或 1 ULP 级） |
-| **D2** | **grad-norm 裁剪改 foreach / 与优化器合并** | `ReduceSum 20.8 + Muls 12.3 = 33 ms`，且 `InplaceAdd 67.8` 里含梯度累加 | **−25~35 ms（3~4%）** | 低 |
+| ~~D1~~ | ~~融合残差加 + rms_norm~~ | `Add` 101.3 ms/471 次 | **实测不可用**：`npu_add_rms_norm` 无 autograd kernel，梯度为 None（E14） | 已否决 |
+| **D2** | grad 桶/裁剪相关拷贝 | `InplaceAdd 67.8` 含梯度累加 | DDP bucket view 实测 −0.15%（E15a）；`ReduceSum/Muls` 经查**不是 grad-clip**（本仓无 `clip_grad_norm_`），来源未定位 | 低优先 |
 | **D3** | **NS 权重预打包，去掉每步 `select`+`transpose`+copy** | `select 64.4 + TransposeBwd 36.9 + InplaceCopy 中的一部分 ≈ 100 ms` | **−50~70 ms（5.6~7.8%）** | 中（要改参数布局与 state_dict 兼容） |
 | **D4** | **FA 反向效率 35.7% → 45%**（分块/减少 softmax 重算） | 158.7 ms/14 次，理论 56.6 ms | **−30~45 ms（3.4~5.0%）** | 高（算法级，要改注意力实现） |
-| **D5** | **图模式 / kernel 融合**（`torch.compile` 或 npugraph_ex capture） | elementwise 162.2 + layout 237.9 = **400 ms（44.8%）** 有融合空间 | 上限 **−150~200 ms（17~22%）**，保守 −80 ms | 中高（动态形状、精度、图捕获稳定性都要验） |
+| **D5** | **完整图模式**（`torch.compile` / npugraph_ex capture，而非 `jit_compile` 开关） | elementwise 162.2 + layout 237.9 = **400 ms（44.8%）** 有融合空间 | 上限 **−150~200 ms（17~22%）** | 中高；`jit_compile=True` 轻量版已实测无效（E15b），需真正的图捕获 |
 | **D6** | **结构对齐论文**（现在只剪 Q，不剪 K/V/FFN；每样本 31.53 GFLOP vs 论文折算 1.29） | FLOPs 差 24.5× | 量级级收益 | 极高（等于改写模型，且会改变与论文的对比口径） |
 
 **建议顺序**：D1 → D2（两项都是低风险、合计约 5~6%，一两轮就能验完）→ D3（唯一能砍 layout 三分之一的中风险项）→ D5（唯一有两位数百分比空间的项，但必须先在 1 die 上验图捕获与精度）→ D4/D6 单独立项。
