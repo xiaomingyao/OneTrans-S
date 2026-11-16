@@ -100,6 +100,18 @@ kernel 数：档 A 2,862/步、档 B 4,534/步（多一遍 micro-batch 的 eleme
 E14 的细节值得留档：`npu_add_rms_norm` 返回三元组 `(y, rstd, x_sum)`，前向与 `npu_rms_norm(a1+a2)` 相比 max rel 8.8e-3（说明它的 RMS 在 bf16 域内算，比现在的 fp32 域差一个量级），
 且反传三个输入梯度全为 `None`——**如果只在训练脚本里"顺手"换上去，loss 会照常下降但梯度是错的**，属必须避免的坑。
 
+## 5.2 路线 A（图模式）实测：两条路都被卡住
+
+| 编号 | 尝试 | 结果 |
+|---|---|---|
+| E16 | `torch.compile(model, backend="inductor")` | **编译失败**：`InductorError: NoTritonConfigsError — No valid triton configs`（Triton codegen 在 FuseKernel 的 mask 分支上找不到合法 config） |
+| E17 | ACL 图捕获 `torch.npu.NPUGraph` 整步 capture + replay | **捕获失败**：batch 1024 时 `OutOfMemoryError capture_end`（68.4/91.75 GiB 已占，捕获还要额外 pool）；降到 batch 512 后换错：`rtStreamEndCapture execution failed, reason=capture model contains a stream that was not joined to the original stream`（步内有算子走内部旁路 stream） |
+
+**附带得到的交叉验证（很有价值）**：单 die、pyramid 6 层、batch 1024（单 micro-batch）、关重算的 eager 稳态步时 = **443.2 ms**；
+翻倍到 1024×2 即 ≈886 ms，与 16 die 实测 **892.5 ms** 只差 **+0.7%** ⇒ 跨机 DDP + allreduce 的净开销确实 ≈0（与档 A 的 +0.09% 结论一致）。
+
+⇒ 路线 A 在这套软件栈上**不是「调个开关」能拿到的**：要可用图模式，需要先把步内算子改成可捕获（FA/HCCL 的内部 stream、capture 期内存池），属专项工程。
+
 ## 6 可优化方向（按 收益 ÷ 风险 排序）
 
 | # | 方向 | 证据 | 预计收益 | 风险 |
@@ -108,7 +120,7 @@ E14 的细节值得留档：`npu_add_rms_norm` 返回三元组 `(y, rstd, x_sum)
 | **D2** | grad 桶/裁剪相关拷贝 | `InplaceAdd 67.8` 含梯度累加 | DDP bucket view 实测 −0.15%（E15a）；`ReduceSum/Muls` 经查**不是 grad-clip**（本仓无 `clip_grad_norm_`），来源未定位 | 低优先 |
 | **D3** | **NS 权重预打包，去掉每步 `select`+`transpose`+copy** | `select 64.4 + TransposeBwd 36.9 + InplaceCopy 中的一部分 ≈ 100 ms` | **−50~70 ms（5.6~7.8%）** | 中（要改参数布局与 state_dict 兼容） |
 | **D4** | **FA 反向效率 35.7% → 45%**（分块/减少 softmax 重算） | 158.7 ms/14 次，理论 56.6 ms | **−30~45 ms（3.4~5.0%）** | 高（算法级，要改注意力实现） |
-| **D5** | **完整图模式**（`torch.compile` / npugraph_ex capture，而非 `jit_compile` 开关） | elementwise 162.2 + layout 237.9 = **400 ms（44.8%）** 有融合空间 | 上限 **−150~200 ms（17~22%）** | 中高；`jit_compile=True` 轻量版已实测无效（E15b），需真正的图捕获 |
+| ~~D5~~ | ~~完整图模式~~ | — | **实测被卡**： inductor 无可用 Triton config（E16）、ACL capture 内部 stream 未 join + 捕获期 OOM（E17） | 需专项工程，非开关级 |
 | **D6** | **结构对齐论文**（现在只剪 Q，不剪 K/V/FFN；每样本 31.53 GFLOP vs 论文折算 1.29） | FLOPs 差 24.5× | 量级级收益 | 极高（等于改写模型，且会改变与论文的对比口径） |
 
 **建议顺序**：D1 → D2（两项都是低风险、合计约 5~6%，一两轮就能验完）→ D3（唯一能砍 layout 三分之一的中风险项）→ D5（唯一有两位数百分比空间的项，但必须先在 1 die 上验图捕获与精度）→ D4/D6 单独立项。

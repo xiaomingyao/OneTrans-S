@@ -249,3 +249,8 @@ torch.OutOfMemoryError: NPU out of memory. Tried to allocate 2.34 GiB (NPU 0; 91
 # E15a DDP gradient_as_bucket_view=True: 891.2ms (-0.15%) ⇒ 无效
 # E15b torch.npu.set_compile_mode(jit_compile=True): 892.6ms (+0.01%) ⇒ 无效
 # 说明: 本仓无 clip_grad_norm_, ReduceSum/Muls 并非 grad-clip; 小改动连续 6 次无效(掩码缓存/权重影子/input bf16/ddp-strict/bucket view/jit) ⇒ 剩余只在大张量搬运+cube 效率
+
+## 路线A 图模式实测（1 die）
+# E16 torch.compile(backend=inductor): 编译失败 NoTritonConfigsError (FuseKernel mask 分支无合法 config)
+# E17 torch.npu.NPUGraph 整步 capture: batch1024 OOM(capture_end, 68.4/91.75GiB); batch512: rtStreamEndCapture failed (算子走内部旁路 stream 未 join)
+# 交叉验证: 单die pyramid6 batch1024 单mb 关重算 eager=443.2ms ⇒ x2≈886ms vs 16die 892.5ms (+0.7%) ⇒ DDP+allreduce 净开销≈0
