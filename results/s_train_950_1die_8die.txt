@@ -254,3 +254,6 @@ torch.OutOfMemoryError: NPU out of memory. Tried to allocate 2.34 GiB (NPU 0; 91
 # E16 torch.compile(backend=inductor): 编译失败 NoTritonConfigsError (FuseKernel mask 分支无合法 config)
 # E17 torch.npu.NPUGraph 整步 capture: batch1024 OOM(capture_end, 68.4/91.75GiB); batch512: rtStreamEndCapture failed (算子走内部旁路 stream 未 join)
 # 交叉验证: 单die pyramid6 batch1024 单mb 关重算 eager=443.2ms ⇒ x2≈886ms vs 16die 892.5ms (+0.7%) ⇒ DDP+allreduce 净开销≈0
+# E18 只捕获前向(NPUGraph, no_grad): 仍 rtStreamEndCapture 失败(旁路 stream 在前向内部, 与 DDP/HCCL 无关)
+# E19 torch.npu.make_graphed_callables(fwd+bwd): 捕获期 OOM(需2.78GiB, 剩671MiB; reserved 89.98/91.75)
+# eager 标度(1die, pyramid6, 关重算): batch512 fwd 67.4ms / step 229.2ms ; batch1024 step 443.2ms ⇒ 1.93x 线性

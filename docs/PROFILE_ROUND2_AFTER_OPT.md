@@ -106,6 +106,14 @@ E14 的细节值得留档：`npu_add_rms_norm` 返回三元组 `(y, rstd, x_sum)
 |---|---|---|
 | E16 | `torch.compile(model, backend="inductor")` | **编译失败**：`InductorError: NoTritonConfigsError — No valid triton configs`（Triton codegen 在 FuseKernel 的 mask 分支上找不到合法 config） |
 | E17 | ACL 图捕获 `torch.npu.NPUGraph` 整步 capture + replay | **捕获失败**：batch 1024 时 `OutOfMemoryError capture_end`（68.4/91.75 GiB 已占，捕获还要额外 pool）；降到 batch 512 后换错：`rtStreamEndCapture execution failed, reason=capture model contains a stream that was not joined to the original stream`（步内有算子走内部旁路 stream） |
+| E18 | 只捕获**前向**（`no_grad` + `torch.npu.graph`） | 仍失败，同一个 `rtStreamEndCapture`（旁路 stream 出在前向内部，与 DDP/HCCL 无关） |
+| E19 | `torch.npu.make_graphed_callables(model, ...)` 捕获 fwd+bwd | **捕获期 OOM**：需 2.78 GiB，只剩 671 MiB（capture pool 使 reserved 已到 89.98/91.75 GiB，且前一次失败留下碎片） |
+
+**图模式的结论是「起不来」，不是「收益小」**：连纯前向都过不了 stream-join 检查，说明是**某个算子内部起了旁路 stream**（嫌疑：FA v4 或 `npu_rms_norm`）。
+若真要推，第一步应做「逐算子的最小捕获二分」定位到具体 op，再决定是绕开它还是换实现——这已属专项工程。
+
+顺带得到的 eager 标度（1 die、pyramid 6、关重算）：`batch 512` 前向 no_grad **67.4 ms**、整步 **229.2 ms**；
+`batch 1024` 整步 **443.2 ms**（前一次探针）⇒ 512→1024 近似 1.93×，**线性标度良好**，说明没有隐藏的固定开销拐点。
 
 **附带得到的交叉验证（很有价值）**：单 die、pyramid 6 层、batch 1024（单 micro-batch）、关重算的 eager 稳态步时 = **443.2 ms**；
 翻倍到 1024×2 即 ≈886 ms，与 16 die 实测 **892.5 ms** 只差 **+0.7%** ⇒ 跨机 DDP + allreduce 的净开销确实 ≈0（与档 A 的 +0.09% 结论一致）。
