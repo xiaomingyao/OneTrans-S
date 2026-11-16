@@ -144,3 +144,16 @@ torch.OutOfMemoryError: NPU out of memory. Tried to allocate 2.34 GiB (NPU 0; 91
 [perf] hbm_peak_alloc_gb=52.27 flops_per_sample=31.529 GFLOP gflops_per_step(global)=1033155.4 mfu_vs_432TF=10.36%
 # Δ: 步时 −25.7% / 吞吐 +34.6% / MFU 7.70→10.36%；与论文 407 ms 的差距 4.77× → 3.55×
 # 附：bmm 模式下 DDP 报「find_unused_parameters=True 但无未用参数」⇒ 下一步可关该开关（未做、未计收益）
+
+## ns-layout 收益复跑（2026-11-16 21:15，111 单节点 8 die，n=8 步中位）
+# why 111：122 的 8 die 全部被另一个 DLRM 作业占用（npu-smi proc-mem 全为有进程），不干扰他人作业
+# 口径：8 die · batch 2048 · 全局 16,384 · bf16 + bool mask + 激活重算 · 两臂同节点同时段顺序跑
+[env] dist=world_size=8 rank=0 local_rank=0
+[perf] steady_median_step_ms=1952.1 mean=1951.8 n=8 global_samples_per_s=8392.9  per_card_samples_per_s=1049.1 mfu_vs_432TF=7.66%   # A ns_bmm=0
+[perf] steady_median_step_ms=1442.3 mean=1442.3 n=8 global_samples_per_s=11359.9 per_card_samples_per_s=1420.0 mfu_vs_432TF=10.36%  # B ns_bmm=1
+# Δ: 步时 −26.1% / 全局吞吐 +35.3% / 每卡 +35.4% / MFU 7.66→10.36%
+# 与上一轮(16 die 122+111: 1942.0→1442.9, −25.7%/+34.6%)一致 ⇒ 收益可复现（两轮独立、跨节点形态）
+# 附：122 上首次重跑的失败签名（供日后判读，勿误判成平台故障）
+#   Communication_Error_Bind_IP_Port(EI0020): Failed to enable listening for the NPU network adapter socket.
+#   Reason: The IP address IpAddress[...df10:xxxx] and port 16666 have already been bound.
+#   与「该节点 die 已被他人作业占用」一致（未做隔离实验，因果标注为推测）
