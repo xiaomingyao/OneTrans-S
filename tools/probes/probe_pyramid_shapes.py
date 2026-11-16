@@ -1,3 +1,12 @@
+#!/usr/bin/env python3
+# coding=utf-8
+"""打印每个 OneTrans block 的输入长度与 query 长度（确认 pyramid 到底剪了什么）。
+
+实测（S 形状，schedule [1203,960,736,480,256,12]）：
+  base 输入 1203；stack0 输入 1203(Lq 1203)；stack1 输入 1203(Lq 960)；stack2 输入 960(Lq 736)…
+⇒ 每个 block 内 **K/V = 该层输入的全序列**，只有 query 取尾部 L′ 行；输出长度变成 L′，
+  于是下一层的「全长」随深度收缩 —— 就是论文 §3.4 的 "reducing the token length to L′"。
+"""
 import os, sys
 sys.path.insert(0, os.getcwd()); sys.path.insert(0, os.getcwd() + "/OneTrans_NPU")
 os.environ.setdefault("ONETRANS_ATTN_MASK", "bool")
