@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OneTrans-S 950DT 训练性能复核 v2</title>
+<style>
+body{font-family:"Microsoft YaHei","PingFang SC",-apple-system,Segoe UI,sans-serif;max-width:1180px;margin:0 auto;
+padding:32px 28px 60px;color:#1f2328;line-height:1.65;font-size:15px;background:#fff}
+h1{font-size:26px;color:#C00000;border-bottom:3px solid #C00000;padding-bottom:10px;margin:6px 0 18px}
+h2{font-size:20px;color:#C00000;border-left:5px solid #C00000;padding-left:10px;margin:34px 0 12px}
+h3{font-size:16.5px;color:#8B0000;margin:22px 0 8px}
+p{margin:9px 0}
+ul,ol{margin:8px 0 8px 22px;padding:0}li{margin:4px 0}
+.tw{overflow-x:auto;margin:12px 0 16px}
+table{border-collapse:collapse;width:100%;font-size:13.5px}
+th{background:#fbeaea;color:#8B0000;font-weight:600;text-align:left;padding:7px 9px;border:1px solid #e3c9c9}
+td{padding:6px 9px;border:1px solid #e3c9c9;vertical-align:top}
+tbody tr:nth-child(even){background:#fcf8f8}
+code{background:#f4f5f7;border-radius:3px;padding:1px 4px;font-family:Consolas,Menlo,monospace;font-size:12.8px;color:#a03030}
+pre{background:#f7f7f9;border:1px solid #e5e5ea;border-left:4px solid #C00000;border-radius:4px;padding:11px 13px;overflow-x:auto}
+pre code{background:none;color:#24292f;padding:0;font-size:12.6px;line-height:1.5}
+blockquote{margin:10px 0;padding:8px 14px;background:#fdf6f6;border-left:4px solid #d98b8b;color:#5b4b4b}
+hr{border:none;border-top:1px solid #eee;margin:22px 0}
+.meta{color:#666;font-size:13px}
+</style></head><body>
+<h1>OneTrans-S 在昇腾 950DT 的训练性能复核报告 v2</h1>
+<ul><li>日期：2026-11-16（v2：补第四步「权重 bf16 影子」无效结论，并更正 Cast 归因）</li><li>目标：按论文 arXiv:2510.26104 的 OneTrans-S 形状（91 M 参数、d=256、H=4、seq 1190→12、6 层 pyramid、per-GPU batch 2048）在 <strong>16 卡 950DT（2×8 die，122 + 111）</strong> 上跑起来，实测步时/吞吐/MFU/显存，与论文 16×H100 的 407 ms <strong>并列</strong>对比（只做训练，不含推理）</li><li>代码与原始数据：<code>github.com/xiaomingyao/OneTrans-S</code>（<code>main</code>，含 <code>results/prof*_kernel_details.csv</code> 全部 profile 原始件）</li></ul>
+<h2>1 结论摘要</h2>
+<div class="tw"><table><thead><tr><th>档</th><th>对齐轴</th><th>步时</th><th>全局 sps</th><th>每卡 sps</th><th>MFU</th><th>HBM</th><th>vs 论文 407 ms</th></tr></thead><tbody><tr><td><strong>A</strong> 每卡 2048 + 激活重算</td><td>全局 batch <strong>和</strong> per-GPU batch 都对齐</td><td><strong>1,112.1 ms</strong></td><td>29,465.3</td><td>1,841.6</td><td><strong>13.44%</strong></td><td>47.57 GB</td><td>2.73×</td></tr><tr><td><strong>B</strong> 每卡 1024×累加2、无重算</td><td>只对齐全局 batch 32,768 / 16 卡</td><td><strong>892.5 ms</strong></td><td>36,716.4</td><td>2,294.8</td><td><strong>16.75%</strong></td><td>70.17 GB</td><td>2.19×</td></tr></tbody></table></div>
+<p>相对本轮起点（1,942.1 ms / 16,872.3 sps / MFU 7.70% / 52.30 GB）： 档 A <strong>−42.74%</strong> 步时、<strong>+74.63%</strong> 吞吐；档 B <strong>−54.04%</strong> 步时、<strong>+117.62%</strong> 吞吐。</p>
+<p>第四步（权重 bf16 影子）<strong>逐位等价但零收益</strong>（档 A −0.15%、档 B +0.06%），未进主表； 它同时否掉了「反向 Cast 主要来自权重」这一判断，见 §3.4。</p>
+<h2>2 口径纪律（先读这段，否则数字会被误读）</h2>
+<ol><li><strong>不与论文相除算「收益%」</strong>：论文 407 ms 是 fp32 未优化基线，本仓是 bf16 + FA 融合 + 融合 norm 档；只能并列。</li><li><strong>档 B 的 per-GPU micro-batch 是 1024×2</strong>，论文是 2048 ⇒ 档 B 只在「全局 batch / 卡数」这一轴上对齐，<strong>不可与档 A 混读</strong>。</li><li>档 A 与档 B 的数学目标相同（micro-batch 均值 ÷ 累加数 = 整批均值），但 bf16 重排 + AdamW 非线性会让 loss 轨迹分叉 （step4：0.93893 vs 0.92159）⇒ <strong>不可逐值比对、不可当精度回归</strong>。</li><li><code>cat_inplace</code> 这一步只改内存写路径，写入值相同；新缓冲的地址/对齐变化会改变下游 kernel 的分块与 fp32 累加顺序 ⇒ loss 相对差 <strong>≤2e-4</strong>（step0 完全一致 0.69804）⇒ 记为 <strong>bf16 噪声级等价</strong>，可用于性能档，不可当精度基线。</li><li>训练数据是合成 token 常驻 device，步时<strong>不含取数/H2D</strong>（纯计算口径）。</li></ol>
+<h2>3 优化逐项（三步有效 + 一步无效，每项都有 kernel 级证据）</h2>
+<h3>3.1 ns-layout：NS-token 专有 QKV/FFN 由「逐 token Linear」合成一次 bmm</h3>
+<ul><li>动机：12 个 NS token 各有自己的 QKV/FFN 权重，原实现每 token 发一个 1-token matmul（每 block 12×3 次）。</li><li>开关 <code>ONETRANS_NS_BMM=1</code>；CPU UT（<code>tools/probes/ut_ns_bmm_equiv.py</code>）：参数量 471,938 一致、前向 <code>max|Δout| 5.96e-08</code>、 反向 <code>worst rel|Δg| 1.34e-06</code>（判据 ≤1e-5）⇒ 等价通过。</li><li>实测（16 die，全局 32,768）：<strong>1,942.0 → 1,442.9 ms（−25.70%）</strong>，吞吐 16,873.0 → 22,710.2 sps（+34.60%），MFU 7.70% → 10.36%。</li><li>独立复跑三次一致（−25.7% / −26.1% / −25.7%）。</li></ul>
+<h3>3.2 融合 rms_norm：手写 norm 链换成 <code>torch_npu.npu_rms_norm</code></h3>
+<ul><li>动机：profile 显示手写链（<code>float→pow→mean→rsqrt→mul→改dtype→乘 fp32 weight</code>）实际占 <strong>≈280 ms/步（19%）</strong>， 其中 <code>Mul</code> 单项 151.6 ms（因为 <code>bf16 × fp32 weight</code> 会把张量提成 fp32 再走一遍向量运算）。</li><li>开关 <code>ONETRANS_FUSED_NORM=1</code>；精度反而更好：对 fp64 参考 <code>max_rel 3.891e-03 / rms 1.655e-03</code>，手写链是 <code>7.704e-03 / 2.347e-03</code> （单算子探针 <code>tools/probes/probe_fused_norm.py</code>，b64/seq1203，0.063 vs 0.205 ms/call）。</li><li>实测（16 die）：<strong>1,443.9 → 1,228.6 ms（−14.90%）</strong>，吞吐 +17.52%，MFU 10.35% → 12.17%，HBM 52.27 → 47.57 GB，kernel 3,083 → 2,762/步。</li><li>逐算子：<code>Mul 151.6→0</code>、<code>Square 27.9→0</code>、<code>Divs 22.2→0</code>、<code>Pow 14.4→0</code>、<code>Mean 13.1→0</code>、<code>ReduceSum 32.2→19.1</code>、<code>Add 130.8→109.0</code>； 新增 <code>RmsNorm 29.7 + RmsNormGrad 35.1</code> ⇒ 净 ≈ −213 ms。</li></ul>
+<h3>3.3 去 cat：<code>_project_one</code> 的 seq/ns 合并改「预分配 + 原地写」</h3>
+<ul><li>开关 <code>ONETRANS_CAT_INPLACE=1</code>；只改内存写路径。</li><li>逐算子（8 die 同档 profile）：<code>Cat_ConcatD 51.4→7.8</code>、<code>Cat_CastAiCore 42.2→6.4</code>、<code>InplaceCopy_Cast 143.1→78.5</code>、 <code>InplaceCopy_Transpose 76.6→26.6</code>；新增 <code>FA 附属转置 27.9</code>、<code>ViewCopy +22.6</code>、<code>TensorMove +21.9</code>；整步 1,235.1 → 1,121.7 ms。</li><li>实测（16 die）：档 A <strong>1,228.6 → 1,112.1 ms（−9.48%）</strong>；档 B <strong>959.2 → 892.5 ms（−6.95%）</strong>。</li></ul>
+<h3>3.4 第四步：权重 bf16 影子（<code>ONETRANS_WEIGHT_SHADOW=1</code>）—— 逐位等价，无收益</h3>
+<ul><li>动机：autocast 每次 <code>F.linear</code>/<code>bmm</code> 都把 fp32 权重现 cast 一遍；重算 + 梯度累加下，同一权重每步被 cast 三次。</li><li>做法：按 <code>(param, 切片)</code> 缓存一份 bf16 权重，每步每权重只 cast 一次；缓存张量仍接在<strong>原 Parameter 的计算图上</strong> （<code>p[idx].transpose(...).to(bf16)</code>）⇒ DDP 梯度同步、激活重算、梯度累加语义全不变，无新增叶子张量。</li><li>精度（UT <code>tools/probes/ut_weight_shadow_equiv.py</code>，NPU、2 步 × 2 micro-batch、含 AdamW）： loss 与 <strong>41/41 参数的梯度逐位相同（rel = 0）</strong>。</li><li>踩坑：bmm 路径的 <strong>bias 必须保持 fp32</strong>。baseline 的 <code>bmm(bf16) + fp32 bias</code> 靠 type-promotion 在 fp32 域相加， 把 bias 一起 cast 成 bf16 会让加法落到 bf16 域，logits 差 1 ULP（9.766e-04）、2 步 loss 相对差 3.4e-4。</li><li>性能（16 die，n=8）：档 A 1,112.1 → <strong>1,110.4 ms（−0.15%）</strong>；档 B 892.5 → <strong>893.0 ms（+0.06%）</strong>；HBM 47.57 → 47.74 GB。</li></ul>
+<p><strong>判定：无效，默认关。</strong> kernel 侧证据（8 die 同档 profile）：kernel 总数 2,862 → 2,693（−169/步）、 名字含 <code>Cast</code> 的算子 665 → 552 次，但 <strong>Cast 总时长只从 84.8 ms 降到 84.5 ms（−0.3 ms）</strong> ⇒ 删掉的是权重级小 cast（每次约 0.02 ms），剩下约 78 ms 全是大张量<strong>激活</strong> cast（544 次、平均 0.14 ms）。</p>
+<p><strong>归因更正（自我纠错）</strong>：此前把反向 Cast 记成「权重在 autocast 边界往返」并预估影子权重可吃 ~7%， 实测上限只有 ~0.03%，该预估撤回。</p>
+<h2>4 失败项与无效项（同口径实测，全部留档）</h2>
+<div class="tw"><table><thead><tr><th>编号</th><th>改动</th><th>结果</th><th>判定</th></tr></thead><tbody><tr><td>E1a</td><td>RMSNorm 输出 dtype 归位（手写链不变）</td><td>1,443.7 vs 1,443.9（+0.03%）；精度不降（3.888e-03→3.891e-03）</td><td>无效</td></tr><tr><td>E4</td><td><code>find_unused_parameters=False</code></td><td>1,228.7 vs 1,228.6（+0.01%）</td><td>无效</td></tr><tr><td>E5</td><td>只重算 FFN、保留 attention 激活</td><td>OOM：82.48 / 91.75 GiB（差 1.43 GiB）</td><td>每卡 2048 不可行</td></tr><tr><td>E9</td><td>档 A + <code>--input-dtype bf16</code></td><td>1,109.5 vs 1,112.1（−0.23%，抖动内）；HBM −0.58 GB</td><td>性能无效，仅省显存</td></tr><tr><td>E10</td><td>档 B + <code>--input-dtype bf16</code></td><td>892.4 vs 892.5（0.0%）；HBM −0.45 GB</td><td>性能无效，仅省显存</td></tr><tr><td>E11</td><td>权重 bf16 影子（<code>ONETRANS_WEIGHT_SHADOW=1</code>）</td><td>档 A 1,110.4 vs 1,112.1（−0.15%）、档 B 893.0 vs 892.5（+0.06%）；精度逐位相同</td><td>无效（删的是权重级小 cast，Cast 时长仅 −0.3 ms）</td></tr></tbody></table></div>
+<h2>5 瓶颈分析证据链</h2>
+<h3>5.1 整步被「算 4 遍」，不是 kernel 效率低</h3>
+<p>用 <code>--no-backward</code> 只跑前向做对照（8 die · 每卡 2048）：</p>
+<div class="tw"><table><thead><tr><th>段</th><th>耗时/步</th><th>kernel/步</th><th>单遍效率</th></tr></thead><tbody><tr><td>仅前向</td><td>309.2 ms</td><td>643</td><td><strong>MFU 48.24%</strong></td></tr><tr><td>完整步</td><td>1,235.1 ms</td><td>2,762</td><td>12.17%</td></tr><tr><td>⇒ backward(+opt)</td><td>925.9 ms</td><td>2,119</td><td>—</td></tr></tbody></table></div>
+<p>分解：真反向 <code>925.9 − 309.2 = 616.7 ms</code> ≈ 2 × 309.2（反向 FLOPs 是前向 2 倍），单遍效率 48.5% 与前向一致 ⇒ <strong>前向 1 遍 + 重算 1 遍 + 真反向 2 遍 = 4 遍算力</strong>，整体 MFU 12.17% ≈ 48.4% ÷ 4。</p>
+<h3>5.2 通信与分布式侧不是瓶颈（已隔离）</h3>
+<div class="tw"><table><thead><tr><th>配置</th><th>步时</th><th>每卡 sps</th><th>MFU</th></tr></thead><tbody><tr><td>1 die（world_size=1，无 DDP）</td><td>1,227.5 ms</td><td>1,668.4</td><td>12.18%</td></tr><tr><td>16 die（DDP + 跨机 UB allreduce）</td><td>1,228.6 ms</td><td>1,667.0</td><td>12.17%</td></tr><tr><td>Δ</td><td><strong>+0.09%</strong></td><td>−0.08%</td><td>—</td></tr></tbody></table></div>
+<p>profile 侧同样只有 13 次 HCCL/步、并集 15.6 ms（1.08%），其中 69% 被计算掩盖 ⇒ 通信净暴露 ≈0.33%； <code>opt.step</code> 仅 3.4 ms（0.2%）⇒ 「反向里的 Cast 与优化器无关」。</p>
+<h3>5.3 当前算子构成（8 die，去 cat 后，1,121.7 ms/步、2,862 kernel/步）</h3>
+<div class="tw"><table><thead><tr><th>类别</th><th>ms/步</th><th>占比</th></tr></thead><tbody><tr><td>cube·FA 融合（含附属转置）</td><td>312.8</td><td>27.9%</td></tr><tr><td>cube·MatMul</td><td>213.7</td><td>19.1%</td></tr><tr><td>vector·逐元素（Mul/Add/Silu…）</td><td>192.9</td><td>17.2%</td></tr><tr><td>layout·切片/拷贝</td><td>157.8</td><td>14.1%</td></tr><tr><td>layout·Cast（665 次，<strong>几乎全是激活</strong>，见 §3.4）</td><td>84.8</td><td>7.6%</td></tr><tr><td>norm 融合（RmsNorm + Grad）</td><td>65.2</td><td>5.8%</td></tr><tr><td>layout·转置</td><td>26.7</td><td>2.4%</td></tr><tr><td>vector·归约</td><td>20.4</td><td>1.8%</td></tr><tr><td>comm</td><td>9.3</td><td>0.8%</td></tr><tr><td>layout·拼接</td><td>7.8</td><td>0.7%</td></tr></tbody></table></div>
+<p>cube 类合计 526.5 ms（46.9%），非 cube 595.3 ms（53.1%）；单遍 cube 效率 48% 说明<strong>每遍内部</strong>已接近一半峰值。</p>
+<h3>5.4 attention 落点核对（FAv4 生效）</h3>
+<p><code>aclnnFlashAttentionScoreV4</code> 前向 7 次/步 + <code>aclnnFlashAttentionScoreGradV4</code> 反向 7 次/步（7 个 block 各一次，前向因重算出现 14 次）， kernel 列表里无 <code>BatchMatMul + Softmax</code> 的注意力回退链（<code>Softmax</code> 只出现在交叉熵）⇒ bool mask 路径确实落到 FA 融合算子。</p>
+<h2>6 未闭合项</h2>
+<ol><li><strong>结构对账</strong>：本仓每样本 31.53 GFLOP（CPU 探针），论文 Table 2 折算 1.29 GFLOP/sample ⇒ 24.5×；pyramid 开关比 1.68× vs 论文 3.06×。 说明本仓只剪 query token、不剪 K/V/FFN，结构与论文不完全一致（README §6）。</li><li><strong>Cast 仍 84.8 ms/步（665 次）</strong>，其中约 78 ms 是 544 次<strong>大张量激活</strong> cast（均 0.14 ms/次），来自 autograd 边界的 bf16/fp32 往返；权重影子实测只能拿掉 0.3 ms（§3.4），要继续啃得改激活的 dtype 流（结构性）。</li><li><strong>FA 反向 158.9 ms/步（7 次）</strong>，按理论 ≈36% 效率，是 cube 里效率最低的一项；进一步要靠 attention 分块/算法级改动。</li></ol>
+<h2>7 产物与复现</h2>
+<pre><code># 档 A（对齐论文 per-GPU batch）
+ONETRANS_NS_BMM=1 ONETRANS_FUSED_NORM=1 ONETRANS_CAT_INPLACE=1 \
+torchrun --nnodes=2 --node_rank=N --nproc_per_node=8 \
+  --master_addr=192.168.0.82 --master_port=296xx scripts/run_onetrans_s.py \
+  --device npu --batch-size 2048 --steps 8 --warmup 3 --checkpoint-act --flops-per-sample 31529400000
+
+# 档 B（关重算，每卡 1024×累加 2）
+... --batch-size 1024 --grad-accum 2 --steps 8 --warmup 3   # 不加 --checkpoint-act
+
+# profile（rank0，3 个稳态步）
+... --profile-dir /tmp/prof --profile-steps 3 [--profile-with-stack]
+# 分析
+python3 tools/probes/analyze_profile.py results/prof_8die_cat_inplace_kernel_details.csv \
+  --step-ms 1111.2 --tflops-per-step 32.29</code></pre>
+<ul><li>原始 profile：<code>results/prof16_kernel_details.csv</code>（16 die 基线）、<code>prof_8die_fused_norm_kernel_details.csv</code>、 <code>prof_8die_cat_inplace_kernel_details.csv</code>、<code>prof_8die_fwdonly_kernel_details.csv</code></li><li>逐项实验记录：<code>docs/OPT_ROUND1_RESULTS.md</code>；实验方案：<code>docs/PLAN_OPT_ROUND1.md</code>；瓶颈分析：<code>docs/PROFILE_16DIE_BOTTLENECK.md</code></li><li>探针：<code>tools/probes/{analyze_profile,probe_phase_split,probe_fused_norm,ut_ns_bmm_equiv,ut_rms_dtype_equiv,ut_weight_shadow_equiv,attribute_by_stack}.py</code></li></ul>
+</body></html>
