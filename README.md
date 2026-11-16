@@ -1,4 +1,4 @@
-# onetrans-s
+# OneTrans-S
 
 **OneTrans-S 在昇腾 950DT 上的训练复核** —— 按论文（arXiv:2510.26104v3）OneTrans-S 的形状把模型拉起来，量真实训练步的**步时 / 吞吐 / 显存 / MFU**，并与论文的 **H100** 数字并列。
 
@@ -15,7 +15,7 @@
 上游 GPU 实现 `WestbrookLong/OneTrans_Pytorch` 以 **git submodule** 锁定 commit，**上游源码零改动**：
 
 ```bash
-git clone --recurse-submodules https://github.com/xiaomingyao/onetrans-s
+git clone --recurse-submodules https://github.com/xiaomingyao/OneTrans-S
 git -C GPU_Reference rev-parse HEAD        # 8febd7e…
 git -C GPU_Reference status --porcelain    # 空 = 未改动
 ```

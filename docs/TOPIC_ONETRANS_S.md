@@ -1,6 +1,6 @@
-# 话题：onetrans-s · OneTrans-S 训练复核（昇腾 950DT，训练侧）
+# 话题：OneTrans-S · OneTrans-S 训练复核（昇腾 950DT，训练侧）
 
-> 状态：立项（2026-11-16）· 论文已归档 `papers/OneTrans_2510.26104v3.pdf/.txt`（arXiv v3）· 仓库已改名 `onetrans-s`
+> 状态：立项（2026-11-16）· 论文已归档 `papers/OneTrans_2510.26104v3.pdf/.txt`（arXiv v3）· 仓库已改名 `OneTrans-S`
 > 范围：**只做训练**。不做推理优化、不做在线 A/B、不做 serving（论文里 KV cache / p99 那套一律不碰）。
 > 目标：在昇腾 950DT 上按 OneTrans-S 的形状（论文 §4.1.4）拉起训练、复核步时/吞吐/显存/MFU，把**训练性能与利用率**与论文的 **H100** 数字并列对比。
 > 进展：形状已印证（参数 91.03 M，+0.03%）、1 die / 8 die 已实测（§7）；**结构等价未闭合**（§4.3）。
@@ -117,7 +117,7 @@
 命令（CPU 即可，无需上卡；本仓 `tools/probes/`，torch 2.10.0+cpu 实测）：
 
 ```bash
-cd onetrans-d && export ONETRANS_NPU_DIR=$PWD/OneTrans_NPU
+cd OneTrans-S && export ONETRANS_NPU_DIR=$PWD/OneTrans_NPU
 python3 tools/probes/param_count_paper.py     # 参数量 + 网格扫
 python3 tools/probes/flops_paper_shape.py     # 每 sample 训练 FLOPs（前向+loss+反向）
 python3 tools/probes/flops_pyramid_ratio.py   # pyramid 开/关的 FLOPs 比值

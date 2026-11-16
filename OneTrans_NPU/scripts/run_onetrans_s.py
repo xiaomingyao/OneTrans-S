@@ -66,7 +66,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num-classes", type=int, default=2)
     # 训练
     p.add_argument("--device", default="npu" if hasattr(torch, "npu") else "cpu")
-    p.add_argument("--batch-size", type=int, default=64, help="**每卡** batch")
+    p.add_argument("--batch-size", type=int, default=64, help="**每卡每个 micro-batch** 的 batch")
+    p.add_argument("--grad-accum", type=int, default=1,
+                   help="梯度累积步数：全局 batch(每次优化器更新) = batch_size × 卡数 × grad_accum")
     p.add_argument("--steps", type=int, default=30, help="计时步数（不含 warmup）")
     p.add_argument("--warmup", type=int, default=5)
     p.add_argument("--lr", type=float, default=5e-3, help="论文 dense 用 RMSProp(5e-3)；这里统一 AdamW")
@@ -128,13 +130,17 @@ def main() -> None:
     log(f"[shape] pyramid_schedule={schedule}")
     log(f"[shape] params={n_params:,} ({n_params/1e6:.2f} M)")
     log(f"[run] amp={use_amp} dtype={args.amp_dtype} mask={args.mask_type} attn_mask_env={os.environ.get('ONETRANS_ATTN_MASK')}"
-        f" per_card_batch={args.batch_size} global_batch={args.batch_size * world_size} ckpt_act={args.checkpoint_act}")
+        f" per_card_micro_batch={args.batch_size} grad_accum={args.grad_accum}"
+        f" per_card_batch={args.batch_size * args.grad_accum} global_batch={args.batch_size * world_size * args.grad_accum}"
+        f" ckpt_act={args.checkpoint_act}")
 
     # 合成 token 常驻 device：步时不含量化搬运（纯计算口径）
+    # 一次生成 grad_accum 个 micro-batch 的数据，累积时按片取用
+    n_local = args.batch_size * args.grad_accum
     gen = torch.Generator(device="cpu").manual_seed(args.seed + rank)
-    non_seq = torch.randn(args.batch_size, args.non_seq_dim, generator=gen).to(args.device)
-    seq = torch.randn(args.batch_size, args.seq_len, args.seq_feat_dim, generator=gen).to(args.device)
-    labels = torch.randint(0, args.num_classes, (args.batch_size,), generator=gen).to(args.device)
+    non_seq = torch.randn(n_local, args.non_seq_dim, generator=gen).to(args.device)
+    seq = torch.randn(n_local, args.seq_len, args.seq_feat_dim, generator=gen).to(args.device)
+    labels = torch.randint(0, args.num_classes, (n_local,), generator=gen).to(args.device)
 
     model = nn.parallel.DistributedDataParallel(
         model, device_ids=[local_rank] if device_type == "npu" else None,
@@ -144,36 +150,42 @@ def main() -> None:
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
     crit = nn.CrossEntropyLoss()
     step_ms: list[float] = []
+    loss_item = 0.0
 
     for i in range(args.warmup + args.steps):
         if device_type == "npu":
             torch.npu.synchronize()
         t0 = time.perf_counter()
         opt.zero_grad(set_to_none=True)
-        with npu_compat.autocast_context(device_type=device_type, amp_dtype=amp_dtype, use_amp=use_amp):
-            logits = model(non_seq, seq)
-            loss = crit(logits, labels)
+        for k in range(args.grad_accum):
+            lo, hi = k * args.batch_size, (k + 1) * args.batch_size
+            with npu_compat.autocast_context(device_type=device_type, amp_dtype=amp_dtype, use_amp=use_amp):
+                logits = model(non_seq[lo:hi], seq[lo:hi])
+                loss = crit(logits, labels[lo:hi]) / args.grad_accum
+                loss_item = loss.item() * args.grad_accum
+            if scaler.is_enabled():
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
         if scaler.is_enabled():
-            scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
         else:
-            loss.backward()
             opt.step()
         if device_type == "npu":
             torch.npu.synchronize()
         dt = (time.perf_counter() - t0) * 1000
         if i >= args.warmup:
             step_ms.append(dt)
-        log(f"[step {i:03d}] {'warm' if i < args.warmup else 'meas'} ms={dt:8.1f} loss={loss.item():.5f}")
+        log(f"[step {i:03d}] {'warm' if i < args.warmup else 'meas'} ms={dt:8.1f} loss={loss_item:.5f}")
 
     med = statistics.median(step_ms)
-    gbs = args.batch_size * world_size
+    gbs = args.batch_size * world_size * args.grad_accum
     gflops = gbs * args.flops_per_sample / 1e9 if args.flops_per_sample > 0 else 0.0
     mfu = (gflops / 1e3) / (med / 1e3) / (world_size * args.peak_tflops) * 100 if gflops > 0 else float("nan")
     hbm_gb = (torch.npu.max_memory_allocated() / 1024**3) if device_type == "npu" else float("nan")
     log(f"[perf] steady_median_step_ms={med:.1f} mean={statistics.mean(step_ms):.1f} n={len(step_ms)}"
-        f" global_samples_per_s={gbs / (med / 1e3):.1f} per_card_samples_per_s={args.batch_size / (med / 1e3):.1f}")
+        f" global_samples_per_s={gbs / (med / 1e3):.1f} per_card_samples_per_s={args.batch_size * args.grad_accum / (med / 1e3):.1f}")
     log(f"[perf] hbm_peak_alloc_gb={hbm_gb:.2f} flops_per_sample={args.flops_per_sample/1e9:.3f} GFLOP"
         f" gflops_per_step(global)={gflops:.1f} mfu_vs_{args.peak_tflops:.0f}TF={mfu:.2f}%")
 
@@ -183,7 +195,8 @@ def main() -> None:
             "shape": {"d_model": args.d_model, "heads": args.num_heads, "ffn": args.ffn_hidden,
                       "blocks": 1 + args.num_pyramid_layers, "seq": args.seq_len, "ns": args.ns_len,
                       "schedule": schedule, "params": n_params},
-            "run": {"world_size": world_size, "per_card_batch": args.batch_size, "global_batch": gbs,
+            "run": {"world_size": world_size, "per_card_micro_batch": args.batch_size,
+                    "grad_accum": args.grad_accum, "per_card_batch": args.batch_size * args.grad_accum, "global_batch": gbs,
                     "amp": use_amp, "dtype": args.amp_dtype, "mask": args.mask_type},
             "perf": {"steady_median_step_ms": med, "mean_step_ms": statistics.mean(step_ms), "n": len(step_ms),
                      "global_samples_per_s": gbs / (med / 1e3), "hbm_peak_alloc_gb": hbm_gb,
