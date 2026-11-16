@@ -132,3 +132,15 @@ torch.OutOfMemoryError: NPU out of memory. Tried to allocate 2.34 GiB (NPU 0; 91
 # 16 die × 2048         : 1942.0 ms / 16,873.0 sps / 每卡 1054.6
 # 卡数 ×2 ⇒ 吞吐 1.993×（跨机扩展效率 99.7%），步时 0.502×，每卡吞吐 −0.34%
 # ⇒ 跨机 UB allreduce 在该形状下不是瓶颈（梯度量 91 M 参数 ≈ 364 MB/步）
+
+## 移植 zeus-onetrans ns-layout（ONETRANS_NS_BMM=1）：NS-token 专有 QKV/FFN 逐 token Linear → 一次 bmm
+# 等价性: CPU UT tools/probes/ut_ns_bmm_equiv.py → params 471,938==471,938 / max|Δout|=5.96e-08 / worst rel|Δg|=1.34e-06 ⇒ PASS
+# 1 die · batch 2048 · 12 步中位（warmup 4）
+[perf] steady_median_step_ms=1908.9 ... global_samples_per_s=1072.9 mfu_vs_432TF=7.83%   # A 基线
+[perf] steady_median_step_ms=1437.8 ... global_samples_per_s=1424.4 mfu_vs_432TF=10.40%  # B ONETRANS_NS_BMM=1
+# Δ: 步时 −24.7% / 吞吐 +32.8% / 参数量不变(91,026,946) / HBM 51.96→51.93 GB
+# 16 die（122+111）· 全局 32,768 · 一次前向（对照：未开 ns_bmm 为 1942.0 ms / 16,873.0 sps / MFU 7.70%）
+[perf] steady_median_step_ms=1442.9 mean=1442.9 n=4 global_samples_per_s=22710.2 per_card_samples_per_s=1419.4
+[perf] hbm_peak_alloc_gb=52.27 flops_per_sample=31.529 GFLOP gflops_per_step(global)=1033155.4 mfu_vs_432TF=10.36%
+# Δ: 步时 −25.7% / 吞吐 +34.6% / MFU 7.70→10.36%；与论文 407 ms 的差距 4.77× → 3.55×
+# 附：bmm 模式下 DDP 报「find_unused_parameters=True 但无未用参数」⇒ 下一步可关该开关（未做、未计收益）

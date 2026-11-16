@@ -1,3 +1,4 @@
+import math
 import os
 
 import torch
@@ -10,6 +11,7 @@ from torch.utils.checkpoint import checkpoint
 _MASK_DTYPE = os.environ.get("ONETRANS_ATTN_MASK", "float").lower()
 
 VALID_MASK_TYPES = {"paper_causal", "origin", "hard_mask", "bimask_soft", "bimask_hard"}
+_SQRT5 = math.sqrt(5.0)
 
 
 class FFNLayer(nn.Module):
@@ -72,9 +74,23 @@ class CausalMaskAttention(nn.Module):
         self.if_mask = if_mask
         self.mask_type = mask_type
         self.dense = nn.Linear(d_model, d_model)
-        self.kqv_list = nn.ModuleList(
-            [nn.ModuleList([nn.Linear(d_model, d_model) for _ in range(3)]) for _ in range(ns_len + 1)]
-        )
+        # [移植自 zeus-onetrans opt_1109 补丁1 的 ns-layout 思路] 把「每个 NS-token 一组独立 Linear」
+        # 合成一次 bmm：ns 段 (B, ns, d) → (ns, B, d) @ (ns, d, d)。数学逐元素等价（每个 token 仍用自己的权重），
+        # 只是把 12×3 次 1-token 小 matmul 变成 3 次 bmm，减少 kernel 下发次数。默认关（ONETRANS_NS_BMM=0）。
+        self.use_bmm = os.environ.get("ONETRANS_NS_BMM", "0") == "1"
+        if self.use_bmm:
+            self.kqv_w = nn.Parameter(torch.empty(ns_len + 1, 3, d_model, d_model))
+            self.kqv_b = nn.Parameter(torch.empty(ns_len + 1, 3, d_model))
+            for g in range(ns_len + 1):
+                for p in range(3):
+                    # 与 nn.Linear 默认初始化同分布（kaiming_uniform a=√5 + U(-1/√fan_in, 1/√fan_in)）
+                    nn.init.kaiming_uniform_(self.kqv_w[g, p], a=_SQRT5)
+                    bound = 1.0 / d_model ** 0.5
+                    nn.init.uniform_(self.kqv_b[g, p], -bound, bound)
+        else:
+            self.kqv_list = nn.ModuleList(
+                [nn.ModuleList([nn.Linear(d_model, d_model) for _ in range(3)]) for _ in range(ns_len + 1)]
+            )
 
     def split_heads(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, _ = x.shape
@@ -115,11 +131,23 @@ class CausalMaskAttention(nn.Module):
         return mask.masked_fill(~allowed, torch.finfo(dtype).min)
 
     def _cal_kqv(self, x: torch.Tensor, group_idx: int, proj_idx: int) -> torch.Tensor:
+        if self.use_bmm:
+            return torch.nn.functional.linear(x, self.kqv_w[group_idx, proj_idx], self.kqv_b[group_idx, proj_idx])
         return self.kqv_list[group_idx][proj_idx](x)
 
     def _project_one(self, x: torch.Tensor, proj_idx: int) -> torch.Tensor:
         seq_len = x.size(1) - self.ns_len
         shared_group_idx = self.ns_len
+        if self.use_bmm:
+            parts = []
+            if seq_len > 0:
+                parts.append(self._cal_kqv(x[:, :seq_len, :], shared_group_idx, proj_idx))
+            if self.ns_len > 0:
+                ns_in = x[:, seq_len:, :].permute(1, 0, 2)                     # (ns, B, d)
+                w = self.kqv_w[: self.ns_len, proj_idx]                        # (ns, d, d)
+                b = self.kqv_b[: self.ns_len, proj_idx].unsqueeze(1)           # (ns, 1, d)
+                parts.append((torch.bmm(ns_in, w.transpose(1, 2)) + b).permute(1, 0, 2))  # (B, ns, d)
+            return parts[0] if len(parts) == 1 else torch.cat(parts, dim=1)
         res = []
         if seq_len > 0:
             res.append(self._cal_kqv(x[:, :seq_len, :], shared_group_idx, proj_idx))
@@ -186,19 +214,49 @@ class OneTransBlock(nn.Module):
             num_heads=num_heads,
             mask_type=mask_type,
         )
-        self.ffn_list = nn.ModuleList(
-            [FFNLayer(input_dim=d_model, unit_1=ffn_units[0], unit_2=ffn_units[1]) for _ in range(ns_len + 1)]
-        )
+        # [ns-layout 移植] 同 attention：NS-token 的专有 FFN 合成一次 bmm（默认关）
+        self.use_bmm = os.environ.get("ONETRANS_NS_BMM", "0") == "1"
+        if self.use_bmm:
+            self.ffn_w1 = nn.Parameter(torch.empty(ns_len + 1, ffn_units[0], d_model))
+            self.ffn_b1 = nn.Parameter(torch.empty(ns_len + 1, ffn_units[0]))
+            self.ffn_w2 = nn.Parameter(torch.empty(ns_len + 1, ffn_units[1], ffn_units[0]))
+            self.ffn_b2 = nn.Parameter(torch.empty(ns_len + 1, ffn_units[1]))
+            for g in range(ns_len + 1):
+                for w, b in ((self.ffn_w1[g], self.ffn_b1[g]), (self.ffn_w2[g], self.ffn_b2[g])):
+                    fan_in = w.size(-1)
+                    nn.init.kaiming_uniform_(w, a=_SQRT5)
+                    bound = 1.0 / fan_in ** 0.5
+                    nn.init.uniform_(b, -bound, bound)
+        else:
+            self.ffn_list = nn.ModuleList(
+                [FFNLayer(input_dim=d_model, unit_1=ffn_units[0], unit_2=ffn_units[1]) for _ in range(ns_len + 1)]
+            )
+
+    def _ffn_one(self, x: torch.Tensor, gi: int) -> torch.Tensor:
+        if self.use_bmm:
+            h = torch.nn.functional.silu(
+                torch.nn.functional.linear(x, self.ffn_w1[gi], self.ffn_b1[gi]))
+            return torch.nn.functional.silu(
+                torch.nn.functional.linear(h, self.ffn_w2[gi], self.ffn_b2[gi]))
+        return self.ffn_list[gi](x)
 
     def cal_mix_param_ffn(self, x: torch.Tensor) -> torch.Tensor:
-        res = []
         seq_len = x.size(1) - self.ns_len
+        res = []
         if seq_len > 0:
-            res.append(self.ffn_list[self.ns_len](x[:, :seq_len, :]))
-        for i in range(self.ns_len):
-            start = seq_len + i
-            res.append(self.ffn_list[i](x[:, start : start + 1, :]))
-        return torch.cat(res, dim=1)
+            res.append(self._ffn_one(x[:, :seq_len, :], self.ns_len))
+        if self.ns_len > 0:
+            if self.use_bmm:
+                ns_in = x[:, seq_len:, :].permute(1, 0, 2)                    # (ns, B, d)
+                h = torch.nn.functional.silu(
+                    torch.bmm(ns_in, self.ffn_w1[: self.ns_len].transpose(1, 2)) + self.ffn_b1[: self.ns_len].unsqueeze(1))
+                o = torch.bmm(h, self.ffn_w2[: self.ns_len].transpose(1, 2)) + self.ffn_b2[: self.ns_len].unsqueeze(1)
+                res.append(torch.nn.functional.silu(o).permute(1, 0, 2))      # (B, ns, d)
+            else:
+                for i in range(self.ns_len):
+                    start = seq_len + i
+                    res.append(self.ffn_list[i](x[:, start : start + 1, :]))
+        return res[0] if len(res) == 1 else torch.cat(res, dim=1)
 
     def _forward_impl(self, x: torch.Tensor) -> torch.Tensor:
         x = self.rms_0(x)
