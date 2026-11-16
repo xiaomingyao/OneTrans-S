@@ -89,6 +89,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--profile-steps", type=int, default=2, help="抓几个稳态步")
     p.add_argument("--profile-with-stack", action="store_true", help="记录调用栈（可按代码位置归因算子）")
     p.add_argument("--ddp-strict", action="store_true", help="find_unused_parameters=False（bmm 模式下全部参数都参与）")
+    p.add_argument("--no-backward", action="store_true", help="只跑前向（诊断 cast 归属用，不做训练）")
     return p.parse_args()
 
 
@@ -183,15 +184,17 @@ def main() -> None:
                 logits = model(non_seq[lo:hi], seq[lo:hi])
                 loss = crit(logits, labels[lo:hi]) / args.grad_accum
                 loss_item = loss.item() * args.grad_accum
+            if not args.no_backward:
+                if scaler.is_enabled():
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
+        if not args.no_backward:
             if scaler.is_enabled():
-                scaler.scale(loss).backward()
+                scaler.step(opt)
+                scaler.update()
             else:
-                loss.backward()
-        if scaler.is_enabled():
-            scaler.step(opt)
-            scaler.update()
-        else:
-            opt.step()
+                opt.step()
         if device_type == "npu":
             torch.npu.synchronize()
         dt = (time.perf_counter() - t0) * 1000

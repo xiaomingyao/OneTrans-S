@@ -196,3 +196,20 @@ torch.OutOfMemoryError: NPU out of memory. Tried to allocate 2.34 GiB (NPU 0; 91
 [phase] 不重算: fwd=175.4 bwd=393.3 total=573.0 ; 重算: fwd=174.6 bwd=550.7 total=729.7
 # ⇒ 重算成本 = bwd +157.4 ms / 整步 +156.7 ms（+27.3%）；折到 2048 档 ≈346 ms ≈ 24% 步时，且落在 bwd 内
 ## 自纠：PROFILE 文档 §3-B3 曾估「手写 norm 链 42.6 ms/步」，实测整链 ≈280 ms（Mul 单项就 151.6）——低估 6 倍，已更正
+
+## 步时分解（8 die · 每卡 2048 · fused_norm，profile 对照：完整步 vs 仅前向 --no-backward）
+[perf] 仅前向:  steady_median_step_ms=309.9  kernels=643/步   MFU=48.24%
+[perf] 完整步:  1235.1 ms/步               kernels=2762/步
+# ⇒ backward(+opt) = 925.9 ms/步、2119 kernel/步（77% 的 kernel 数）
+# 分解（关键）: fwd 309.2 + 重算 309.2（= 925.9-309.2 之外的 fwd 二遍）+ 真反向 616.7 ≈ 2×309
+#   ⇒ 单遍效率：fwd MFU 48.24%；真反向 2×149.5/616.7 = 48.5% —— 两遍效率一致
+#   ⇒ 整步 MFU 12.1% ≈ 48.4%/4，即「算力被计了 4 遍」：前向 1 + 重算 1 + 反向 2
+# Cast 归属: 完整 185.3 ms/726 次 → 仅fwd 62.1 ms/236 次 ⇒ backward 侧 123.3 ms/490 次（autograd 内部）
+
+## 关掉重算、改每卡 1024×accum2（全局仍 32,768）—— 有效，且比「每卡 2048+重算」快 21.9%
+[run] ... per_card_micro_batch=1024 grad_accum=2 per_card_batch=2048 global_batch=32768 ckpt_act=False
+[perf] steady_median_step_ms=959.2 mean=959.2 n=8 global_sps=34161.9 per_card=2135.1 mfu=15.58% hbm=70.66 GB
+# 对照（每卡 2048 + 重算）: 1228.6 ms / 26671.4 sps / MFU 12.17% / HBM 47.57 GB
+# Δ: 步时 −21.92% / 吞吐 +28.09% / MFU +3.41pp；显存 +23.09 GB（70.66/91.75，仍安全）
+# 口径: 全局 batch 与卡数完全一致（32,768 / 16 卡），只有「每卡 micro-batch 1024+累加2」与「是否重算」不同；
+#       loss 口径等价（各 micro-batch 取均值再除 accum ⇒ 与 2048 整批均值一致）
