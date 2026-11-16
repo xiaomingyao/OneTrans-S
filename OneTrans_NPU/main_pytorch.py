@@ -20,6 +20,18 @@ class FFNLayer(nn.Module):
         self.act = nn.SiLU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        n_chunk = int(os.environ.get("ONETRANS_FFN_CHUNK", "0"))
+        if n_chunk > 0:
+            # [NPU] 按「行」（batch×token）分块做 FFN：数学逐元素等价，只为压瞬时显存
+            # （每卡 batch 4096 时 unit_1 激活约 15 GiB 一口气分配会撞 96 GiB HBM 上限）
+            shape = x.shape
+            flat = x.reshape(-1, shape[-1])
+            if flat.shape[0] > n_chunk:
+                # 预分配输出 + 原地写分片：避免 torch.cat 再复制一份整张量（4096 时约省 2.5 GiB）
+                out = torch.empty_like(flat)
+                for s in range(0, flat.shape[0], n_chunk):
+                    out[s : s + n_chunk] = self.act(self.proj_2(self.act(self.proj_1(flat[s : s + n_chunk]))))
+                return out.view(shape)
         x = self.act(self.proj_1(x))
         x = self.act(self.proj_2(x))
         return x

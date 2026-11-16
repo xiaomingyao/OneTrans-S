@@ -50,9 +50,30 @@ git -C GPU_Reference status --porcelain    # 空 = 未改动
 
 三条实测结论：
 
-1. **显存是硬约束**：1 die 每卡 2048 不开激活重算直接 OOM（已分配 86.63 GiB、还需 2.34 GiB）；8 die 每卡 4096 即便开重算也 OOM（已分配 64.80 GiB、还需 8.49 GiB，单 die 91.75 GiB）⇒ 论文 per-GPU 2048 是这台机器的实际可达上沿，全局 32,768 只能靠 `--grad-accum 2`。
+1. **显存是硬约束**：1 die 每卡 2048 不开激活重算直接 OOM（已分配 86.63 GiB、还需 2.34 GiB）；**每卡 4096 任何组合都上不去**（见 §3.1）⇒ 论文 per-GPU 2048 是这台机器的实际可达上沿，全局 32,768 只能靠 `--grad-accum 2`。
 2. **吞吐在 batch ≥ 512 后进入平台**（每卡 1.06k–1.22k sps）：batch 256 时固定开销占比高；把全局 batch 从 16,384 抬到 32,768 只把步时线性拉长 2.001×，吞吐 8,470.9 → 8,465.4（−0.06%）⇒ 该形状每卡算力已饱和。
 3. **8 卡扩展 7.87×（效率 98.3%）**，每卡 sps 仅降 1.7% ⇒ 该形状下 DDP 梯度同步**不是**瓶颈；瓶颈在单卡 kernel 效率（MFU 7.7–8.9%）。
+
+### 3.1 每卡 batch=4096 为什么上不去（2026-11-16 排查）
+
+论文全局 32,768 ÷ 8 die = 每卡 4096 是**算术值**，但物理上装不下。逐级压显存，缺口从 11.11 GiB 收到 18 MiB，最后卡在 **FlashAttention 反向的 workspace** 而不是激活量：
+
+| 步骤 | 手段 | 结果 |
+|---|---|---|
+| 1 | b4096 + 激活重算（基线） | OOM，需再 11.11 GiB（已分配 80.01 / 91.75） |
+| 2 | `PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:512` | OOM（80.01 / 需 11.11）——不是碎片问题 |
+| 3 | `expandable_segments:True` | OOM（79.91 / 需 11.11） |
+| 4 | `ONETRANS_FFN_CHUNK=131072`（分块 FFN） | OOM，需再 386 MiB（89.66） |
+| 5 | 预分配写分片（去掉 `torch.cat` 的整张量复制），chunk=32768 | OOM，需再 22 MiB（90.20） |
+| 6 | 输入 token 存 bf16（`--input-dtype bf16`） | OOM，需再 18 MiB（89.93） |
+| 7 | `garbage_collection_threshold:0.5` | 显存过了，算子失败：`aclnnFlashAttentionScoreGradV4` / `ERR00100 PTA call acl api failed` |
+
+两个可复用的实验旋钮（默认关闭，不影响已记录结果）：
+
+- `ONETRANS_FFN_CHUNK=<rows>`：FFN 按行分块，**数学逐元素等价**，但 bf16 下**非逐位一致**（b256 两步 loss `0.68401/1.74561` vs `0.68401/1.74525`，相对差 2.1e-4）。
+- `--input-dtype bf16`：常驻 device 的输入 token 改 bf16（4096 batch 下省 0.6 GiB）。
+
+⇒ 结论：**96 GiB/die 上 OneTrans-S（seq 1190）单卡上沿 = 2048**；要 per-card 4096 必须走 16 die（122+111，全局 32,768 一次前向）或改造注意力分块（未做，标待办）。
 
 原始日志：`results/s_train_950_1die_8die.txt`（含每步 ms / loss / OOM 原始报错）。
 

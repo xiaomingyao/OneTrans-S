@@ -92,3 +92,19 @@ torch.OutOfMemoryError: NPU out of memory. Tried to allocate 2.34 GiB (NPU 0; 91
 # 全局 32,768（micro 2048 × accum 2）: 3870.8 ms / 8,465.4 sps
 # 步时比 = 2.001×，吞吐比 = 0.9994（−0.06%）⇒ 该形状每卡算力饱和，加全局 batch 只线性加时间、不涨吞吐
 # 与论文同全局 batch 并列（不相除）：论文 16×H100 407 ms/步、每卡 5,032 sps；本仓 8 die 3870.8 ms/步、每卡 1,058 sps
+
+## 每卡 batch=4096 的可行性排查（论文全局 32,768 ÷ 8 die 的算术值；2026-11-16）
+# 逐级压显存，缺口从 11.11 GiB 收到 18 MiB，最后卡在 FlashAttention 反向 workspace
+1) b4096 + 激活重算（基线）                    : OOM，需再 11.11 GiB（已分配 80.01 / 91.75 GiB）
+2) + PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:512 : OOM（已分配 80.01，需再 11.11）
+3) + expandable_segments:True                  : OOM（已分配 79.91，需再 11.11）
+4) + ONETRANS_FFN_CHUNK=131072（分块 FFN, cat） : OOM，需再 386 MiB（已分配 89.66）
+5) + 预分配写入（免 cat 复制）chunk=32768        : OOM，需再 22 MiB（已分配 90.20）
+6) + 输入 token 存 bf16（--input-dtype bf16）    : OOM，需再 18 MiB（已分配 89.93）
+7) + garbage_collection_threshold:0.5          : 显存过了，但算子失败：
+   RuntimeError: ... current working operator name is aclnnFlashAttentionScoreGradV4
+   [ERROR] ERR00100 PTA call acl api failed
+# 结论：96 GiB/die 上，OneTrans-S 形状（seq 1190）单卡 batch 上沿 = 2048；4096 的瓶颈不是激活量，
+#       而是 FA 反向（FlashAttentionScoreGradV4）自己的 workspace。全局 32,768 只能用 --grad-accum 2。
+# 附：分块 FFN 的数值口径（ONETRANS_FFN_CHUNK 数学逐元素等价，但 bf16 非逐位一致）
+#     b256 两步 loss：no-chunk 0.68401 / 1.74561 ；chunk=131072 0.68401 / 1.74525（相对差 2.1e-4）

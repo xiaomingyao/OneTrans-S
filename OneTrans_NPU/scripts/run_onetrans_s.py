@@ -76,6 +76,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-amp", dest="amp", action="store_false")
     p.set_defaults(amp=True)
     p.add_argument("--amp-dtype", choices=("bf16", "fp16"), default="bf16")
+    p.add_argument("--input-dtype", choices=("fp32", "bf16"), default="fp32",
+                   help="常驻 device 的输入 token 用哪种 dtype 存（bf16 省一半输入显存，仅用于压显存的对照实验）")
     p.add_argument("--checkpoint-act", action="store_true", help="激活重算（省显存、换时间）")
     p.add_argument("--seed", type=int, default=42)
     # 口径
@@ -116,6 +118,8 @@ def main() -> None:
     log = print if is_main else (lambda *a, **k: None)
 
     use_amp = npu_compat.should_enable_amp(device_type, args.amp, args.amp_dtype)
+    # 输入按训练精度落地（bf16 时省一半输入显存：4096 batch 下 1190×64 token 张量 1.25 GiB → 0.62 GiB）
+    in_dtype = torch.bfloat16 if (args.input_dtype == "bf16" and use_amp and args.amp_dtype == "bf16") else torch.float32
     amp_dtype = torch.bfloat16 if args.amp_dtype == "bf16" else torch.float16
     scaler = npu_compat.build_scaler(device_type, use_amp, amp_dtype)
 
@@ -129,7 +133,7 @@ def main() -> None:
         f" (multi={args.multi_num}) seq={args.seq_len} ns={args.ns_len} sep={args.use_sep_token} total={total_tokens}")
     log(f"[shape] pyramid_schedule={schedule}")
     log(f"[shape] params={n_params:,} ({n_params/1e6:.2f} M)")
-    log(f"[run] amp={use_amp} dtype={args.amp_dtype} mask={args.mask_type} attn_mask_env={os.environ.get('ONETRANS_ATTN_MASK')}"
+    log(f"[run] amp={use_amp} input_dtype={in_dtype} dtype={args.amp_dtype} mask={args.mask_type} attn_mask_env={os.environ.get('ONETRANS_ATTN_MASK')}"
         f" per_card_micro_batch={args.batch_size} grad_accum={args.grad_accum}"
         f" per_card_batch={args.batch_size * args.grad_accum} global_batch={args.batch_size * world_size * args.grad_accum}"
         f" ckpt_act={args.checkpoint_act}")
@@ -138,8 +142,8 @@ def main() -> None:
     # 一次生成 grad_accum 个 micro-batch 的数据，累积时按片取用
     n_local = args.batch_size * args.grad_accum
     gen = torch.Generator(device="cpu").manual_seed(args.seed + rank)
-    non_seq = torch.randn(n_local, args.non_seq_dim, generator=gen).to(args.device)
-    seq = torch.randn(n_local, args.seq_len, args.seq_feat_dim, generator=gen).to(args.device)
+    non_seq = torch.randn(n_local, args.non_seq_dim, generator=gen).to(args.device, dtype=in_dtype)
+    seq = torch.randn(n_local, args.seq_len, args.seq_feat_dim, generator=gen).to(args.device, dtype=in_dtype)
     labels = torch.randint(0, args.num_classes, (n_local,), generator=gen).to(args.device)
 
     model = nn.parallel.DistributedDataParallel(
