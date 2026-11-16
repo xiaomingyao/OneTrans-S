@@ -136,6 +136,11 @@ E14 的细节值得留档：`npu_add_rms_norm` 返回三元组 `(y, rstd, x_sum)
 所以「用内置 causal 省掉 `q<k` 层的掩码」这条路不通；G1 已经是这条思路能拿到的全部（`q==k` 层，−5.1%）。
 （复现要点：关键字是 `atten_mask`，不是 `attn_mask`；后者会直接报 `Unknown keyword argument`。）
 
+补充两条实测（同一探针）：① 只要给了 `atten_mask`，`sparse_mode=3` 直接报 `error code 161001`（该形状不合法），
+只有 `sparse_mode=1` 能跑；② **FA 的 `atten_mask` 语义是「True = 屏蔽」，与 PyTorch SDPA 的「True = 保留」相反** ——
+传反了输出 max|Δ| = 4.531（全错），改成屏蔽语义后 **max|Δ| = 0.000（逐位等价）**、`dk/dv` 反向也逐位相同。
+这条语义反了，是 `BSH` 布局能落地的关键（见 §6 方向 1：fwd 2.215 → 1.513 ms，−31.7%）。
+
 ## 6 可优化方向（按 收益 ÷ 风险 排序）
 
 | # | 方向 | 证据 | 预计收益 | 风险 |
