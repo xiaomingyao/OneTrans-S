@@ -20,6 +20,14 @@ _CKPT_SCOPE = os.environ.get("ONETRANS_CKPT_SCOPE", "all").lower()
 _FUSED_NORM = os.environ.get("ONETRANS_FUSED_NORM", "0") == "1"
 # [E7] _project_one 的 seq/ns 合并：cat → 预分配 + 原地写入（逐位等价，只改内存写路径）
 _CAT_INPLACE = os.environ.get("ONETRANS_CAT_INPLACE", "0") == "1"
+# [E13] attention 掩码缓存（同形状只算一次；掩码与权重/激活无关 ⇒ 逐位等价）
+_MASK_CACHE_ENABLE = os.environ.get("ONETRANS_MASK_CACHE", "0") == "1"
+_MASK_CACHE: dict = {}
+
+
+def clear_mask_cache() -> None:
+    _MASK_CACHE.clear()
+
 # [E11] 权重影子：autocast 会在每次 F.linear 调用时把 fp32 权重 cast 一遍，重算/累加下同一份权重要 cast 3 次。
 # 这里按 (param, 切片) 在一个 step 内复用同一份 bf16 权重 ⇒ 每个权重每步只 cast 一次。
 # 影子靠在原 Parameter 的计算图上（p[idx].to(bf16)），不新增叶子张量 ⇒ DDP 梯度同步、激活重算、
@@ -147,6 +155,22 @@ class CausalMaskAttention(nn.Module):
         return x.transpose(1, 2)
 
     def create_attention_mask(self, query_len: int, key_len: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        """[E13] 掩码缓存：同形状（每步都一样）只算一次。
+
+        原先每个 block、每个 micro-batch 都重算一次 `arange` 比较（7 block × 2 accum = 14 次/步，
+        实测 arange 类 kernel 约 12 ms/步 + 比较/填充若干）。掩码只依赖 (mask_type, q_len, k_len, dtype)，
+        与权重、激活无关 ⇒ 缓存后逐位等价。
+        """
+        if not _MASK_CACHE:
+            return self._build_attention_mask(query_len, key_len, device, dtype)
+        key = (self.mask_type, _MASK_DTYPE, query_len, key_len, str(device), str(dtype), self.ns_len)
+        hit = _MASK_CACHE.get(key)
+        if hit is None:
+            hit = self._build_attention_mask(query_len, key_len, device, dtype)
+            _MASK_CACHE[key] = hit
+        return hit
+
+    def _build_attention_mask(self, query_len: int, key_len: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
         if self.mask_type == "paper_causal":
             row_idx = torch.arange(query_len, device=device).unsqueeze(1)
             col_idx = torch.arange(key_len, device=device).unsqueeze(0)

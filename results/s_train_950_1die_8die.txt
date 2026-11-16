@@ -234,3 +234,12 @@ torch.OutOfMemoryError: NPU out of memory. Tried to allocate 2.34 GiB (NPU 0; 91
 # UT(NPU, 2步x2accum, AdamW): loss 与 41/41 参数梯度逐位相同(rel=0); 踩坑 bmm bias 须留 fp32(type promotion)
 # profile(8die): kernel 2862→2693(−169/步), 含 Cast 算子 665→552 次, 但 Cast 时长 84.8→84.5 ms(−0.3 ms)
 # ⇒ 删掉的是权重级小 cast(~0.02ms/次), 大头是大张量激活 cast(544次, 0.14ms/次); 上限实际 ~0.03%, 撤回「~7%」预估
+
+## 优化后深度 profile（档B 892.5ms / 档A 1121.7ms, 8die rank0 3稳态步）
+# 档B 类别: cube 377.6(41.6%) | 逐元素 162.2(17.9%) | 拷贝 141.4(15.6%) | 归约norm 71.2(7.8%) | Cast 64.1(7.1%) | 转置 32.4 | other 30.7 | comm 20.8(2.3%)
+# 档B 算力账: 每卡每步 64.57 TFLOP; 单遍理想149.5ms; 关重算=3遍⇒理想448.5ms; 实测892.5=50.2%
+#            仅前向(no_grad) 261.7ms=单遍57.1%; 反推反向一遍315.4ms=47.4% (反向每遍比前向贵20.5%)
+# 效率: cube全体 171TF/s(39.6%) | FA前向 226TF/s(52.3%) | FA反向 154TF/s(35.7%) | MatMul 173TF/s(40.1%) | Add≈2.9TB/s(贴HBM上限)
+# op级: InplaceCopy 173.5 | InplaceAdd 67.8 | select 64.4 | ToCopyBwd 64.1 | BatchMatMul 45.3 | InplaceZero 40.0 | TransposeBwd 36.9 | slice 34.0 | SliceBwd 32.2
+# 碎片化: >=200us 占28.2%数量/76.7%时间; <20us 占14.9%数量/0.8%时间 ⇒ 不是kernel太碎
+# E13 掩码缓存: 档A 1111.7(-0.04%) / 档B 892.2(-0.03%) ⇒ 无效(默认关)

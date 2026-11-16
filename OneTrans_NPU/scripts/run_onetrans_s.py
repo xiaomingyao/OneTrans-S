@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import statistics
@@ -181,7 +182,8 @@ def main() -> None:
         opt.zero_grad(set_to_none=True)
         for k in range(args.grad_accum):
             lo, hi = k * args.batch_size, (k + 1) * args.batch_size
-            with npu_compat.autocast_context(device_type=device_type, amp_dtype=amp_dtype, use_amp=use_amp):
+            _nogr = torch.no_grad() if args.no_backward else contextlib.nullcontext()
+            with _nogr, npu_compat.autocast_context(device_type=device_type, amp_dtype=amp_dtype, use_amp=use_amp):
                 logits = model(non_seq[lo:hi], seq[lo:hi])
                 loss = crit(logits, labels[lo:hi]) / args.grad_accum
                 loss_item = loss.item() * args.grad_accum

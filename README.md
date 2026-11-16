@@ -14,6 +14,7 @@
 | [`docs/OPT_ROUND1_RESULTS.md`](docs/OPT_ROUND1_RESULTS.md) | Round1 逐项实验记录（E1a/E1b/E4/E5/E7/E9/E10/E11，含无效项留档与归因更正） |
 | [`docs/PLAN_OPT_ROUND1.md`](docs/PLAN_OPT_ROUND1.md) | 实验方案与验收门槛（单变量、同节点同档 A/B、≥1% 且大于极差、精度门禁先过） |
 | [`docs/PROFILE_16DIE_BOTTLENECK.md`](docs/PROFILE_16DIE_BOTTLENECK.md) | 16 卡 profile 全景与 4 条瓶颈（含 B3 低估 6 倍的更正） |
+| [`docs/PROFILE_ROUND2_AFTER_OPT.md`](docs/PROFILE_ROUND2_AFTER_OPT.md) | **优化后版本的深度 profile**：类别构成、算力账、op 级归因、效率核算、6 个可优化方向（含收益/风险） |
 | [`docs/OPT_PORT_FROM_ZEUS.md`](docs/OPT_PORT_FROM_ZEUS.md) | zeus-onetrans 8 项优化的逐项准入判定 |
 | [`docs/TOPIC_ONETRANS_S.md`](docs/TOPIC_ONETRANS_S.md) | 论文事实唯一真源（形状、Table 4/5 数字、口径） |
 
