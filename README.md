@@ -1,113 +1,135 @@
-# onetrans-d
+# onetrans-s
 
-ByteDance OneTrans（TAAC2026 推荐模型）在昇腾 **950DT** 的开源实现。
-整个移植工程包括昇腾适配代码、冒烟测试、精度验证、迁移指导。
+**OneTrans-S 在昇腾 950DT 上的训练复核** —— 按论文（arXiv:2510.26104v3）OneTrans-S 的形状把模型拉起来，量真实训练步的**步时 / 吞吐 / 显存 / MFU**，并与论文的 **H100** 数字并列。
 
-## 1. 项目介绍
+> 范围：**只做训练**。推理、cross-request KV cache、p99 延迟那套一律不做。
+> 状态：形状已对齐（参数量 `91,026,946` vs 论文 91 M，+0.03%），1 die / 8 die 已实测；**结构等价性未闭合**（§5）。
+> 论文归档 `papers/OneTrans_2510.26104v3.pdf`；话题与证据链 `docs/TOPIC_ONETRANS_S.md`；原始日志 `results/`。
 
-上游 `WestbrookLong/OneTrans_Pytorch`（序列建模 + 金字塔多尺度注意力 + 多任务塔）以 **git submodule** 引用并锁定 commit，**上游源码零改动**：
+## 1. 这个仓做什么
+
+1. **复刻形状**：论文 OneTrans-S = 6 个堆叠 OneTrans block、d=256、H=4、序列 token 1190 → 12（每层对齐 32）、NS-token 12、per-GPU batch 2048。
+2. **复核训练**：在 950DT 上按这个形状跑训练步，量四个数（稳态步时 / 吞吐 / HBM 峰值 / MFU），留可复跑探针与原始日志。
+3. **与 H100 并列**：只并列绝对值与各自口径的百分比，**不相除算收益**（跨平台纪律）。
+
+上游 GPU 实现 `WestbrookLong/OneTrans_Pytorch` 以 **git submodule** 锁定 commit，**上游源码零改动**：
 
 ```bash
-git clone --recurse-submodules https://github.com/xiaomingyao/onetrans-d
-git -C GPU_Reference rev-parse HEAD        # 8febd7e…；status --porcelain 为空 = 未改动
+git clone --recurse-submodules https://github.com/xiaomingyao/onetrans-s
+git -C GPU_Reference rev-parse HEAD        # 8febd7e…
+git -C GPU_Reference status --porcelain    # 空 = 未改动
 ```
 
-本仓做的事：
+## 2. 形状对账（论文 vs 本仓实测）
 
-1. **迁移**：把这份 GPU 代码迁到 950DT，改动只在接线层（见 §3）。
-2. **取证**：冒烟、三段精度、DDP 梯度等价、1–8 die 扩展性，全部留可复跑探针与日志（见 §4）。
-3. **复现**：4 条命令重跑核心结论（见 §5），逐项细节见 `docs/`。
+| 项 | 论文 OneTrans-S | 本仓实测 | 判定 |
+|---|---|---|---|
+| 参数量（dense，不含稀疏表） | 91 M（Table 2） | **91,026,946 = 91.03 M** | +0.03%，PASS |
+| 层数 | 6 stacked blocks（§4.1.4） | 7 = 6 个 pyramid 段 + 1 个全长期 base block | 实现多 1 个 base block，结构对账里要说明 |
+| 宽度 / heads | d=256 / H=4 | 256 / 4 | PASS |
+| pyramid | 1190 → 12，每层取 32 的整数倍（§4.1.4） | `[1203, 960, 736, 480, 256, 12]`（起点 1203 = 1190 + 12 + 1 个 `[SEP]`） | 形状一致，起点含 SEP |
+| per-GPU batch | 2048（§4.1.2） | `per_card_batch=2048`，8 die 时全局 16,384 | PASS |
+| 每样本训练算力 | 2.64 TFLOPs @batch 2048（口径未说明） | **31.53 GFLOP/sample**（CPU `FlopCounterMode` 实测） | ❌ 差 24.5×，见 §5 |
 
-| 目录 | 内容 |
-|---|---|
-| `GPU_Reference/` | submodule → 上游原仓 @ `8febd7e`（零改动，diff 与数值对照的基准） |
-| `OneTrans_NPU/` | 移植实现：`npu_compat.py`（兼容层）+ `main_pytorch.py` + `scripts/run_taac2026_sample.py` + `tests/`（探针） |
-| `docs/` | `GPU_VS_NPU_CODE_IMPLEMENTATION.md`（代码实现对比）· `MIGRATION.md`（五阶段迁移对照） |
-| `patches/` | `npu_changes.diff`（完整改动） |
-| `results/` | 各类实测日志（§4 每行标了对应文件） |
-| `tools/` | 文档与配图生成器 |
+参数只是必要条件：能落到 91 M 的形状**至少三组解**，所以本仓不拿参数量当结构等价的证据。
 
-## 2. 验证环境
+## 3. 950DT 实测（2026-11-16）
 
-| 项 | 值 |
-|---|---|
-| SoC | `Ascend950DT` V120（板卡 `IT23HMDB_D2`，NPU Name `9582`） |
-| 规模 | 单机 8 die；单 die HBM 96 GiB |
-| CANN | toolkit **9.1.0** |
-| 驱动 / 固件 | 宿主机 **25.1.rc2**（Firmware `7.0.9.100.203`） |
-| 镜像 / OS | `zeus-950-v2-snap:20261102` / Ubuntu 22.04.5（glibc 2.35） |
-| Python | 3.11.0（`/opt/buildtools/torch_v2_pt2.7.1`） |
-| PyTorch | **2.7.1+cpu** + **torch_npu 2.7.1.post4** |
-| 真实数据可选栈 | `datasets` 5.2.0 · `huggingface_hub` 2.4.0 · `pyarrow` 26.0.1 |
+环境（本轮 S 复核）：`Ascend950DT_9582` / CANN 9.1.0 / **torch 2.10.0+cpu + torch_npu 2.10.0** / 容器 `zeus-950-v2`。
+口径：bf16 autocast + **bool mask**（落 `FlashAttentionScoreV4`）+ AdamW；**token 常驻 device ⇒ 步时不含取数与 H2D**（纯计算口径）；MFU 分母 = 单 die Cube bf16 **432 TF**（32 AI core × 1650 MHz）。
 
-环境判据：
+| 配置 | 每卡 batch | 全局 batch | 稳态步时 | 每卡 sps | 全局 sps | HBM 峰值 | MFU |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 1 die | 256 | 256 | 233.7 ms | 1,095.6 | 1,095.6 | 20.79 GB | 8.00% |
+| 1 die | 512 | 512 | 434.6 ms | 1,178.2 | 1,178.2 | 40.39 GB | 8.60% |
+| 1 die | 1024 | 1024 | 837.0 ms | 1,223.4 | 1,223.4 | 79.55 GB | 8.93% |
+| 1 die | 1024（+激活重算） | 1024 | 966.4 ms | 1,059.6 | 1,059.6 | 26.64 GB | 7.73% |
+| **1 die** | **2048（+重算）** | 2,048 | **1,901.8 ms** | 1,076.9 | 1,076.9 | 51.96 GB | 7.86% |
+| **8 die** | **2048（+重算）** | 16,384 | **1,934.2 ms** | 1,058.9 | **8,470.9** | 52.30 GB | 7.73% |
 
-1. 运行首行必须打印 `{'torch': '2.7.1+cpu', 'torch_npu': '2.7.1.post4', 'soc': 'Ascend950DT_9582'}`，对不上不能与本仓数字对比。
-2. 950 上 AMP 只放行 bf16（平台 autocast 默认 dtype 是 fp16；本仓按实测只用 bf16），FP8 无直调入口。
-3. 数字绑定本表环境，换机型或换 CANN / torch 版本需重测。
+三条实测结论：
 
-## 3. 从 GPU 迁移到 NPU
+1. **每卡 batch=2048 必须开激活重算**：不开启直接 `NPU out of memory`（已分配 86.63 GiB、还需 2.34 GiB；单 die 91.75 GiB）。
+2. **吞吐在 batch ≥ 512 后进入平台**（每卡 1.06k–1.22k sps）：batch 256 时固定开销占比高，加 batch 只摊薄开销，算力利用率不涨。
+3. **8 卡扩展 7.87×（效率 98.3%）**，每卡 sps 仅降 1.7% ⇒ 该形状下 DDP 梯度同步**不是**瓶颈；瓶颈在单卡 kernel 效率（MFU 7.7–8.9%）。
 
-改动集中在「接线层」，模型定义与数据管道**零改动**：触碰上游 2 个文件 **147 行**（`main_pytorch.py` +9/−0、`scripts/run_taac2026_sample.py` +104/−34，占 1,233 行活跃 Python 的 11.9%），另新增兼容层 `npu_compat.py` 160 行；`models/*`、`utils/*` **0 行**。
+原始日志：`results/s_train_950_1die_8die.txt`（含每步 ms / loss / OOM 原始报错）。
+
+## 4. 与论文 H100 并列（不做除法）
+
+| 项 | 论文 H100 | 本仓 950DT | 口径说明 |
+|---|---|---|---|
+| 训练规模 | 16 × H100，data-parallel all-reduce | 8 die（950DT 1 die = 1 卡） | 卡数不同，禁换算 |
+| per-GPU batch | 2048 | 2048 | 同口径 |
+| 全局 batch | 32,768 | 16,384 | — |
+| 稳态步时 | **407 ms**（Table 4，未优化基线） | **1,901.8 ms**（1 die）/ 1,934.2 ms（8 die） | ⚠️ 论文那档是 **fp32 / 未优化**，本仓是 **bf16 + FlashAttention + 重算**，不同口径 |
+| 训练显存峰值 | 53.13 GB（同未优化档） | 51.96 / 52.30 GB | 数值接近但精度档不同，不作因果 |
+| 吞吐 | 论文未给（32,768 ÷ 0.407 s ≈ 80,511 sps，**推算**） | **8,470.9 sps**（8 die 实测） | 对外只引用实测值 |
+| MFU | **S 未给**；OneTransL 30.8%（bf16，Table 5）；DCNv2+DIN 13.4% | **7.73%–8.93%**（分母 432 TF；分子 CPU 探针 31.53 GFLOP/sample） | 峰值来源不同源；S 侧只能自测 |
+
+三条引用纪律（详见 `docs/TOPIC_ONETRANS_S.md` §5）：① 跨平台不相除；② 论文 H100 那档是 fp32 未优化基线，不能与本仓 bf16 优化档直接比快慢，只能并列；③ 论文没给 S 的 bf16/MFU，「按 OneTransL 的 30.8% 推 S」属口径混用（本仓曾算错过一次，已在话题文档自纠）。
+
+## 5. 已知差距：结构对账未闭合
+
+| 判据 | 论文 | 本仓 | 结论 |
+|---|---|---|---|
+| 参数量 | 91 M | 91.03 M | ✅ 但属**多解命中**（ffn/ns 至少三组组合都能落到 91 M） |
+| pyramid 开/关的算力比值 | 8.08 / 2.64 = **3.06×**（Table 3 vs Table 2） | **1.68×** | ❌ 本仓 pyramid 只剪 query、不剪 K/V/FFN |
+| 每样本训练算力 | 2.64 TFLOPs（口径未说明；摊到 batch 2048 ≈ 1.29 GFLOP/sample） | 31.53 GFLOP/sample | ❌ 24.5× |
+
+⇒ 现阶段只能宣称「**同形状**的 OneTrans 训练」，不能宣称「= 论文 OneTrans-S」。复现脚本：`tools/probes/`（参数量 / 每样本 FLOPs / pyramid 比值，CPU 可跑）。
+
+## 6. 训练入口
+
+```bash
+cd OneTrans_NPU
+
+# 1 die 冒烟（形状对齐、跑通即可）
+python3 scripts/run_onetrans_s.py --device npu --batch-size 64 --steps 10 --warmup 3
+
+# 1 die 论文 per-GPU batch（必须开激活重算，否则 OOM）
+python3 scripts/run_onetrans_s.py --device npu --batch-size 2048 --steps 20 --warmup 5 \
+  --checkpoint-act --flops-per-sample 31529400000
+
+# 8 die（参数面不变，只换拉起方式）
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 torchrun --nproc_per_node=8 \
+  scripts/run_onetrans_s.py --device npu --batch-size 2048 --steps 20 --warmup 5 \
+  --checkpoint-act --flops-per-sample 31529400000 --out-json ../results/s_8die.json
+```
+
+常用旋钮只有 `--batch-size / --steps / --checkpoint-act / --flops-per-sample` 四个；形状默认值就是论文 S，不要手改模型代码。
+判据：`[shape] params=91,026,946` ∧ `[shape] pyramid_schedule=[1203, 960, 736, 480, 256, 12]` ∧ `[perf] steady_median_step_ms` 有值 ∧ 退出码 0。
+
+## 7. 迁移与精度验证（历史资产，仍然有效）
+
+接线改动只在 `npu_compat.py` + 两个入口脚本，`models/*`、`utils/*` 零改动（上游 submodule 亦零改动）；触碰上游 2 文件 147 行，占 1,233 行活跃 Python 的 11.9%。逐项对照 →
+[`docs/GPU_VS_NPU_CODE_IMPLEMENTATION.md`](docs/GPU_VS_NPU_CODE_IMPLEMENTATION.md)、[`docs/MIGRATION.md`](docs/MIGRATION.md)、[`patches/npu_changes.diff`](patches/npu_changes.diff)。
 
 | # | 修改点 | 修改说明 |
 |---|---|---|
-| 1 | 新增兼容层 `npu_compat.py` | 把设备初始化、AMP 能力门、no-op scaler、autocast 上下文、HCCL 分布式、收尾统一收进一个文件（160 行），业务代码只调这层接口；因此 `models`、`utils` 保持 0 行，换机型只改这一处 |
-| 2 | attention mask 形态开关 | `main_pytorch.py` 新增 `ONETRANS_ATTN_MASK=float\|bool`（+9 行），默认 float 与上游逐字等价。950 上 float 加性 mask 会让 SDPA 退回 Cast+Muls+BatchMatMul+Softmax 手工路径（45 kernel / 139 µs），bool mask 才落 `FlashAttentionScoreV4`（6 kernel / 36.9 µs，3.77×） |
-| 3 | AMP 能力门 | `should_enable_amp()` 在 NPU 只放行 bf16（平台 autocast 默认 dtype 是 fp16），GradScaler 改为 no-op；本模型 bf16 实测更慢，故默认关闭，只有显式 `--amp --amp-dtype bf16` 才开 |
-| 4 | 多卡装配 | HCCL + `device_ids=[local_rank]` + `broadcast_buffers=False` + `find_unused_parameters=True`（最深金字塔块有 16 个参数本步不参与前向）；训练集按 rank 切分、验证只在 rank0 跑全量，**循环内不做跨卡归约**——实测 epoch 末 `all_gather` + `.cpu()` 会卡在 D2H |
-| 5 | 计时与收尾 | 计时前加 `torch.npu.synchronize()`（否则步时偏小）；收尾 `shutdown()` + `os._exit(0)`，避免平台 teardown 抖动被误报成任务失败 |
+| 1 | 新增兼容层 `npu_compat.py`（160 行） | 设备初始化 / AMP 能力门 / no-op scaler / autocast / HCCL / 收尾集中一处；`models`、`utils` 保持 0 行 |
+| 2 | attention mask 形态开关 | `ONETRANS_ATTN_MASK=float\|bool`（+9 行）。float 加性 mask 让 SDPA 退回 Cast+Muls+BatchMatMul+Softmax（45 kernel / 139 µs）；bool mask 落 `FlashAttentionScoreV4`（6 kernel / 36.9 µs，3.77×） |
+| 3 | AMP 能力门 | NPU 只放行 bf16（平台 autocast 默认 fp16），GradScaler 改 no-op |
+| 4 | 多卡装配 | HCCL + `device_ids=[local_rank]` + `broadcast_buffers=False` + `find_unused_parameters=True`（最深 pyramid 块有 16 个参数本步不参与前向）；循环内不做跨卡归约 |
+| 5 | 计时与收尾 | 计时前 `torch.npu.synchronize()`；收尾 `shutdown()` + `os._exit(0)`，避免 teardown 抖动被误报成失败 |
 
-细节（每项的「改前 vs 改后 + 判据」）：
+精度三段（NPU vs CPU fp32 golden，全部 PASS，日志 `results/accuracy_950_rerun.txt`）：fp32 前向 `max|Δ|=1.49e-07`（cos 0.99999988）；bf16 前向 `max|Δ|=2.59e-03`（cos 0.99998170）；10 步训练轨迹 `Δloss=5.96e-08`、`Δacc=0.00 pp`。
 
-- 逐项说明 → [`docs/GPU_VS_NPU_CODE_IMPLEMENTATION.md`](docs/GPU_VS_NPU_CODE_IMPLEMENTATION.md)
-- 按五阶段并排对照（GPU 左 / NPU 右，标出哪段零改动） → [`docs/MIGRATION.md`](docs/MIGRATION.md)
-- 逐行 diff → [`patches/npu_changes.diff`](patches/npu_changes.diff)（对上游副本 `patch -p1` 可精确复原 `OneTrans_NPU/`）
+> ⚠️ 环境差异：以上历史验证跑在 **torch 2.7.1+cpu / torch_npu 2.7.1.post4 / Python 3.11**（`/opt/buildtools/torch_v2_pt2.7.1`，SoC `Ascend950DT` V120 板卡 `IT23HMDB_D2`、CANN 9.1.0）下；§3 的 S 复核跑在同一节点另一容器（**torch 2.10.0+cpu / torch_npu 2.10.0 / Python 3.12**）。两套数字各自绑定自己的环境，**不跨环境比较**。toy 配置下的功能/多卡历史结果（冒烟 76.9 ms、mask kernel 3.77×、DDP `worst rel|Δg|=1.21e-06`、1/2/4/8 die 扩展 4.44×）见 `results/` 与 `docs/MIGRATION.md`。
 
-## 4. 测试验证
+## 8. 目录
 
-两表统一为「项 / 判据 / 实测 / 结果 / 日志」五列；日志列的路径均在 `results/` 下。
+| 目录 | 内容 |
+|---|---|
+| `GPU_Reference/` | submodule → 上游 GPU 实现 @ `8febd7e`（零改动，diff 与数值基准） |
+| `OneTrans_NPU/` | NPU 实现：`npu_compat.py` 兼容层 + `scripts/run_onetrans_s.py`（本仓主入口）+ 数据版入口 + `tests/` 探针 |
+| `papers/` | 论文 PDF + 文本（v3） |
+| `docs/` | 话题与证据链（`TOPIC_ONETRANS_S.md`）、代码实现对比、五阶段迁移对照 |
+| `tools/probes/` | 参数量 / 每样本 FLOPs / pyramid 比值三个 CPU 探针 |
+| `results/` | 实测日志（每行可追溯到命令与环境） |
+| `patches/` | 完整改动 diff |
 
-### 4.1 精度验证（NPU 输出 vs CPU fp32 golden）
-
-判据与实测按编号一一对应（① 对 ①，② 对 ②）：
-
-| 项 | 判据 | 实测 | 结果 | 日志 |
-|---|---|---|---|---|
-| A：NPU **fp32** 前向 vs CPU fp32 golden | ① `max\|Δ\| ≤ 1e-4`<br>② `cos ≥ 0.99999` | ① `1.490e-07`（余量 671×）<br>② `0.99999988` | **PASS** | `accuracy_950_rerun.txt` |
-| B：NPU **bf16** 前向（autocast）vs CPU fp32 golden | ① `max\|Δ\| ≤ 2e-2`<br>② `cos ≥ 0.9995` | ① `2.591e-03`（余量 7.7×）<br>② `0.99998170` | **PASS** | 同上 |
-| C：10 步训练轨迹（loss / acc 逐步比对） | ① `Δloss ≤ 1e-2`<br>② `Δacc ≤ 2 pp` | ① `5.960e-08`<br>② `0.00 pp`（`1.0000` vs `1.0000`） | **PASS** | 同上 |
-
-补充误差明细（不参与判定，仅说明误差幅度）：输出均值量级 `1.595e-01`；A（fp32）平均绝对误差 `5.470e-08`、相对误差 `3.43e-07`（0.0000343%）；B（bf16）平均绝对误差 `8.663e-04`、相对误差 `5.43e-03`（0.5431%）；C 两端 loss 轨迹均是 `1.594162 → 0.375242`。
-
-指标含义：
-
-- `max|Δ|`：NPU 输出与 CPU golden 逐元素相减后取绝对值的最大值（最大绝对误差，单位同输出量纲）。
-- `mean|Δ|`：同一批元素上绝对误差的平均值，反映整体偏移。
-- `rel`：`mean(|Δ|) / mean(|golden|)`，平均绝对误差占 golden 平均幅值的比例。
-- `cos`：两输出展平后的余弦相似度，1 表示方向完全一致。
-
-**验收结论：OK —— 三段判据全部满足**（脚本 `[verdict] A=True B=True C=True` → `ACCURACY PASS`），无失败项。
-
-### 4.2 功能、性能与多卡
-
-| 项 | 判据 | 实测 | 结果 | 日志 |
-|---|---|---|---|---|
-| 冒烟（前向 + 反向 + 3 步优化） | loss 有限且下降、参数有更新 | loss `1.610520 → 0.794862`、`param_delta = 3.008e-03`；首步 ~610–645 ms（编译预热）→ 稳态 **76.9 / 77.3 ms** | **PASS** | `smoke_950_final.txt` |
-| mask 形态（kernel 级） | bool mask 落 `FlashAttentionScoreV4`，kernel 耗时显著低于 float 加性 | float 139.0 µs / 45 kernel → bool 36.9 µs / 6 kernel（**3.77×**）；端到端中位 **+2.4%** | **PASS**（保留为可选开关，不默认开） | `kd_*.csv`、`bench_mask_mode_950.txt` |
-| 多卡扩展（每 rank 本地 batch 64） | 吞吐随 die 数单调上升 | 1/2/4/8 die 稳态 **829.5 / 1,303.6 / 2,348.3 / 3,686.2** samples/s = **1.00 / 1.57 / 2.83 / 4.44×**（效率 78.6% / 70.8% / 55.5%） | **PASS** | `scaling_real_data_950.txt` |
-| DDP 梯度等价 | `worst rel\|Δg\| ≤ 1e-5` 且 `Δloss = 0` | 2 die DDP vs 单进程同全局 batch：`worst rel\|Δg\| = 1.211e-06`、loss 差 `Δ = 0.000e+00` | **PASS — 等价** | `verify_950_rerun.txt` |
-| 端到端训练（真实数据） | 能训完 epoch 并产出 val 指标 | 1,000 行 2 epoch：单 die 13 步/epoch、**78.9 ms/步 / 811.2 samples/s**、val AUC 0.5429；2 die **99.1 ms/步 / 646.0 samples/s**（样本极小，不代表任务精度） | **PASS** | `train_hf_real_950.txt`、`train_hf_real_2card_950.txt` |
-
-指标含义：
-
-- `worst rel|Δg|`：逐个参数张量算 `max|g_DDP − g_单进程| / max|g_单进程|`（分母取该张量自身最大绝对值，下限 `1e-12`），再在全部 747 个张量上取**最大值** —— 即「最坏那一个梯度张量的相对偏差」，比平均相对误差更严格。
-
-**汇总：§3 全部验证项通过** —— 精度 A/B/C 判据满足（`ACCURACY PASS`）、冒烟 PASS、mask 落点验证成立、多卡扩展 4.44×、DDP 梯度等价、端到端训练跑通；无失败项。
-
-口径：kernel 级加速比 ≠ 端到端收益；多卡数字绑定「每卡本地 batch」，换口径不可比。2026-11-15 的逐条复跑记录见 `results/verify_950_rerun.txt`。
-
-## 5. 快速开始
+## 9. 快速开始（历史探针）
 
 ```bash
 # 冒烟（前向 + 反向 + 3 步）
@@ -119,12 +141,10 @@ python OneTrans_NPU/tests/accuracy_npu.py --steps 10
 # 与参考实现对照（两侧各起子进程，比结构 + 数值）
 python OneTrans_NPU/tests/compare_ref_vs_npu.py
 
-# 单卡端到端训练（真实数据集；bool mask 变体加 ONETRANS_ATTN_MASK=bool）
+# 真实数据集端到端训练（toy 形状；bool mask 变体加 ONETRANS_ATTN_MASK=bool）
 HF_ENDPOINT=https://hf-mirror.com python OneTrans_NPU/scripts/run_taac2026_sample.py \
   --device npu --batch-size 32 --epochs 2 --seq-len 32 --d-model 64 --multi-num 2 \
   --num-pyramid-layers 3 --amp --amp-dtype bf16 --output-dir /tmp/onetrans_out
 ```
 
-多卡（DDP/HCCL 扩展性）、mask 与 AMP 单项 A/B、HCCL dtype 探针、一键批量脚本的完整命令与判据 → [`docs/MIGRATION.md`](docs/MIGRATION.md) §6.4「固化：一条命令跑完五阶段」；各探针用途见 `OneTrans_NPU/tests/`。
-
-两个 `run_*.sh` 是本机 ssh + docker 封装（含 `<工号>` 占位路径），换机器需改顶部 5 个变量；本机直跑用上面 4 条即可。
+多卡（DDP/HCCL）、mask 与 AMP 单项 A/B、HCCL dtype 探针、一键批量脚本 → [`docs/MIGRATION.md`](docs/MIGRATION.md) §6.4。

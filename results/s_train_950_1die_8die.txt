@@ -1,0 +1,71 @@
+# OneTrans-S 在 950DT 的训练实测（合成 token，纯计算口径）
+# 环境: Ascend950DT_9582 / CANN 9.1.0 / torch 2.10.0+cpu / torch_npu 2.10.0 / 容器 zeus-950-v2
+# 形状: d=256 heads=4 ffn=1536 blocks=7(6 pyramid + 1 base) seq=1190 ns=12 sep=1
+#       pyramid_schedule=[1203, 960, 736, 480, 256, 12]  params=91,026,946 (91.03 M)
+# 口径: bf16 autocast + bool mask(落 FlashAttentionScoreV4) + AdamW；token 常驻 device ⇒ 步时不含取数/H2D
+#       MFU = 全局 batch × 31.529 GFLOP/sample ÷ (卡数 × 432 TF × 步时)，分子来自 tools/probes/flops_paper_shape.py
+# 命令: python3 scripts/run_onetrans_s.py --device npu --batch-size B [--checkpoint-act] --flops-per-sample 31529400000
+#       torchrun --nproc_per_node=8 scripts/run_onetrans_s.py ... (8 die)
+# 采集: 2026-11-16
+
+## 1 die（ASCEND_RT_VISIBLE_DEVICES=0）
+# batch=256  (steps=5 warmup=2)
+[step 001] warm ms=   280.7 loss=1.74549
+[step 002] meas ms=   233.7 loss=1.16647
+[step 003] meas ms=   233.4 loss=2.25933
+[step 004] meas ms=   233.9 loss=0.69031
+[step 005] meas ms=   233.6 loss=0.94775
+[step 006] meas ms=   233.8 loss=0.72388
+[perf] steady_median_step_ms=233.7 mean=233.7 n=5 global_samples_per_s=1095.6 per_card_samples_per_s=1095.6
+[perf] hbm_peak_alloc_gb=20.79 flops_per_sample=31.529 GFLOP gflops_per_step(global)=8071.5 mfu_vs_432TF=8.00%
+
+# batch=512  (steps=4 warmup=2)
+[step 002] meas ms=   434.6 loss=3.33150
+[step 003] meas ms=   435.1 loss=1.57271
+[step 004] meas ms=   434.5 loss=1.76369
+[step 005] meas ms=   434.5 loss=0.90729
+[perf] steady_median_step_ms=434.6 mean=434.7 n=4 global_samples_per_s=1178.2 per_card_samples_per_s=1178.2
+[perf] hbm_peak_alloc_gb=40.39 flops_per_sample=31.529 GFLOP gflops_per_step(global)=16143.1 mfu_vs_432TF=8.60%
+
+# batch=1024 (steps=4 warmup=2)
+[step 002] meas ms=   837.2 loss=2.17165
+[step 003] meas ms=   836.7 loss=0.98557
+[step 004] meas ms=   837.0 loss=0.92511
+[step 005] meas ms=   837.0 loss=0.85046
+[perf] steady_median_step_ms=837.0 mean=837.0 n=4 global_samples_per_s=1223.4 per_card_samples_per_s=1223.4
+[perf] hbm_peak_alloc_gb=79.55 flops_per_sample=31.529 GFLOP gflops_per_step(global)=32286.1 mfu_vs_432TF=8.93%
+
+# batch=1024 + 激活重算 (--checkpoint-act)
+[step 002] meas ms=   966.4 loss=2.17177
+[step 003] meas ms=   966.4 loss=0.98544
+[step 004] meas ms=   966.3 loss=0.92392
+[step 005] meas ms=   966.4 loss=0.84997
+[perf] steady_median_step_ms=966.4 mean=966.4 n=4 global_samples_per_s=1059.6 per_card_samples_per_s=1059.6
+[perf] hbm_peak_alloc_gb=26.64 flops_per_sample=31.529 GFLOP gflops_per_step(global)=32286.1 mfu_vs_432TF=7.73%
+
+# batch=2048 无重算 → OOM（写在这里，作为「每卡 2048 必须开重算」的证据）
+torch.OutOfMemoryError: NPU out of memory. Tried to allocate 2.34 GiB (NPU 0; 91.75 GiB total capacity; 86.63 GiB already allocated; 2.30 GiB free; 88.70 GiB reserved in total by PyTorch).
+
+# batch=2048 + 激活重算（论文 per-GPU batch 口径）
+[step 002] meas ms=  1901.9 loss=2.06998
+[step 003] meas ms=  1901.9 loss=0.92144
+[step 004] meas ms=  1901.7 loss=0.69795
+[step 005] meas ms=  1901.4 loss=0.70300
+[perf] steady_median_step_ms=1901.8 mean=1901.7 n=4 global_samples_per_s=1076.9 per_card_samples_per_s=1076.9
+[perf] hbm_peak_alloc_gb=51.96 flops_per_sample=31.529 GFLOP gflops_per_step(global)=64572.2 mfu_vs_432TF=7.86%
+
+## 8 die（torchrun --nproc_per_node=8，batch=2048 + 激活重算）
+[env] {'device_type': 'npu', 'torch': '2.10.0+cpu', 'torch_npu': '2.10.0', 'soc': 'Ascend950DT_9582'} dist=world_size=8 rank=0 local_rank=0
+[run] amp=True dtype=bf16 mask=paper_causal attn_mask_env=bool per_card_batch=2048 global_batch=16384 ckpt_act=True
+[step 000] warm ms=  2731.7 loss=0.69808
+[step 001] warm ms=  1933.8 loss=1.34579
+[step 002] meas ms=  1933.5 loss=2.21798
+[step 003] meas ms=  1932.7 loss=1.17834
+[step 004] meas ms=  1934.8 loss=0.94758
+[step 005] meas ms=  1936.0 loss=0.73007
+[perf] steady_median_step_ms=1934.2 mean=1934.2 n=4 global_samples_per_s=8470.9 per_card_samples_per_s=1058.9
+[perf] hbm_peak_alloc_gb=52.30 flops_per_sample=31.529 GFLOP gflops_per_step(global)=516577.7 mfu_vs_432TF=7.73%
+
+## 汇总（同 batch=2048 + 重算，1 die vs 8 die 同配置可比）
+# 1 die: 1901.8 ms / 1,076.9 sps；8 die: 1934.2 ms / 8,470.9 sps
+# 扩展比 = 8470.9 / 1076.9 = 7.87×（8 卡效率 98.3%）；每卡 sps 仅降 1.7% ⇒ 该形状下 DDP 梯度同步不是瓶颈

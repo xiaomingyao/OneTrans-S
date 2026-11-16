@@ -1,8 +1,9 @@
-# 话题：onetrans-d · 复刻 OneTrans-S（训练侧）
+# 话题：onetrans-s · OneTrans-S 训练复核（昇腾 950DT，训练侧）
 
-> 状态：立项（2026-11-16）· 论文已归档 `papers/OneTrans_2510.26104v3.pdf/.txt`（arXiv v3）
+> 状态：立项（2026-11-16）· 论文已归档 `papers/OneTrans_2510.26104v3.pdf/.txt`（arXiv v3）· 仓库已改名 `onetrans-s`
 > 范围：**只做训练**。不做推理优化、不做在线 A/B、不做 serving（论文里 KV cache / p99 那套一律不碰）。
-> 目标：在昇腾 950DT 上把 **OneTrans-S** 复刻到与论文同结构、同 batch 口径，把**训练性能与利用率**与论文的 **H100** 数字并列对比。
+> 目标：在昇腾 950DT 上按 OneTrans-S 的形状（论文 §4.1.4）拉起训练、复核步时/吞吐/显存/MFU，把**训练性能与利用率**与论文的 **H100** 数字并列对比。
+> 进展：形状已印证（参数 91.03 M，+0.03%）、1 die / 8 die 已实测（§7）；**结构等价未闭合**（§4.3）。
 > 本文件是话题的唯一真源：论文数字只在这里落一次，报告引用本文件。
 
 ---
@@ -164,3 +165,30 @@ python3 tools/probes/flops_pyramid_ratio.py   # pyramid 开/关的 FLOPs 比值
 1. 逐层读 `MultiOneTransBlock`/`OneTransBlock` 的 `pyramid_stack_len` 语义，确认「只剪 query」还是「剪 token」，定位 1.68× vs 3.06× 的差；
 2. 用 1 组 `k`（NS-token 数）+ FFN 比重的形状扫，把「参数 91 M」与「ratios 3.06×」两个约束同时满足的配置找出来（现在只满足第一个）；
 3. 三条口径读法各算一次 407 ms 的自洽性，写进 §4.1，得出「可判定/不可判定」的结论。
+
+---
+
+## 7 实测（2026-11-16，950DT，S2 已达成）
+
+入口：`OneTrans_NPU/scripts/run_onetrans_s.py`（形状默认值 = 论文 S；合成 token **常驻 device** ⇒ 步时**不含取数与 H2D**，纯计算口径）。
+环境：`Ascend950DT_9582` / CANN 9.1.0 / torch 2.10.0+cpu + torch_npu 2.10.0 / 容器 `zeus-950-v2`。
+MFU 分母 432 TF（单 die Cube bf16，32 核 × 1650 MHz）；分子 31.529 GFLOP/sample（`tools/probes/flops_paper_shape.py`）。
+
+| 配置 | 每卡 batch | 全局 batch | 稳态步时 | 全局 sps | HBM | MFU |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 die | 256 | 256 | 233.7 ms | 1,095.6 | 20.79 GB | 8.00% |
+| 1 die | 512 | 512 | 434.6 ms | 1,178.2 | 40.39 GB | 8.60% |
+| 1 die | 1024 | 1,024 | 837.0 ms | 1,223.4 | 79.55 GB | 8.93% |
+| 1 die | 1024 + 重算 | 1,024 | 966.4 ms | 1,059.6 | 26.64 GB | 7.73% |
+| 1 die | **2048 + 重算** | 2,048 | **1,901.8 ms** | 1,076.9 | 51.96 GB | 7.86% |
+| 8 die | **2048 + 重算** | 16,384 | **1,934.2 ms** | **8,470.9** | 52.30 GB | 7.73% |
+
+判据与结论：
+
+1. `[shape] params=91,026,946` ∧ `pyramid_schedule=[1203, 960, 736, 480, 256, 12]` ∧ `EXIT=0` ⇒ **形状复核通过**。
+2. 每卡 2048 **必须开激活重算**：不开则 `NPU out of memory`（已分配 86.63 GiB / 还需 2.34 GiB / 单 die 91.75 GiB）。
+3. 8 卡扩展 **7.87×（效率 98.3%）**，每卡 sps 仅降 1.7% ⇒ DDP 梯度同步不是瓶颈；瓶颈在单卡 kernel 效率（MFU 7.7–8.9%，对比论文 OneTransL 30.8% bf16）。
+4. 与论文并列（**不相除**）：论文 per-GPU 2048 的 407 ms 是 **fp32/未优化基线**，本仓 1,901.8 ms 是 **bf16+FA+重算**；论文 S 的 bf16 步时与 MFU 均未给，**任何「按 30.8% 折算 S」都不成立**。
+
+原始日志：`results/s_train_950_1die_8die.txt`。
+阶段状态：S2 **完成**（1 die + 8 die 跑通、四项数字齐全）；S3 部分完成（MFU + HBM 已有，AICore util 与 HCCL 占比待采）；S4 待出报告。
