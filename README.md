@@ -193,7 +193,7 @@ zeus-onetrans 的 8 项优化按本仓准入四条（数学等价 / loss-梯度�
 **四条瓶颈（按可动性排序）**：① layout 搬运占 32%（Cast 677 次/步 + pyramid 切片/拼接/转置）；
 ② cube 内只跑 30.9%（FA 前向 14 次/步 = 7 block × 激活重算的二次前向）；③ 手写 RMSNorm 链 `Square 27.9 + Pow 14.4` 共 42.6 ms/步，
 而容器内已有 `npu_add_rms_norm`/`npu_rms_norm_backward` 融合算子未用；④ kernel 碎片 3,083 个/步。
-可动候选与预估收益见该文档 §4（第 1 项融合 RMSNorm 预估 60~80 ms/步，需 UT 验等价后再合）。
+可动候选与预估收益见该文档 §4。**实验方案已定稿：`docs/PLAN_OPT_ROUND1.md`**（E1a/E1b/E3/E4/E5 单变量设计、判据、采集协议、收益门槛）。
 
 ## 6. 已知差距：结构对账未闭合
 
