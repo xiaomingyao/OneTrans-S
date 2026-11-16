@@ -18,6 +18,8 @@ _RMS_FP32_OUT = os.environ.get("ONETRANS_RMS_DTYPE", "0") == "1"
 _CKPT_SCOPE = os.environ.get("ONETRANS_CKPT_SCOPE", "all").lower()
 # [E1b] 用昇腾融合 rms_norm 算子替代手写链（Square+Pow+ReduceSum+Rsqrt+Mul）
 _FUSED_NORM = os.environ.get("ONETRANS_FUSED_NORM", "0") == "1"
+# [E7] _project_one 的 seq/ns 合并：cat → 预分配 + 原地写入（逐位等价，只改内存写路径）
+_CAT_INPLACE = os.environ.get("ONETRANS_CAT_INPLACE", "0") == "1"
 
 
 class FFNLayer(nn.Module):
@@ -164,7 +166,14 @@ class CausalMaskAttention(nn.Module):
                 w = self.kqv_w[: self.ns_len, proj_idx]                        # (ns, d, d)
                 b = self.kqv_b[: self.ns_len, proj_idx].unsqueeze(1)           # (ns, 1, d)
                 parts.append((torch.bmm(ns_in, w.transpose(1, 2)) + b).permute(1, 0, 2))  # (B, ns, d)
-            return parts[0] if len(parts) == 1 else torch.cat(parts, dim=1)
+            if len(parts) == 1:
+                return parts[0]
+            if _CAT_INPLACE:
+                out = parts[0].new_empty((parts[0].size(0), parts[0].size(1) + parts[1].size(1), parts[0].size(-1)))
+                out[:, : parts[0].size(1)] = parts[0]
+                out[:, parts[0].size(1) :] = parts[1]
+                return out
+            return torch.cat(parts, dim=1)
         res = []
         if seq_len > 0:
             res.append(self._cal_kqv(x[:, :seq_len, :], shared_group_idx, proj_idx))

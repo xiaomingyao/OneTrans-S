@@ -219,3 +219,11 @@ torch.OutOfMemoryError: NPU out of memory. Tried to allocate 2.34 GiB (NPU 0; 91
 # 对照 16 die（同档）: 1228.6 ms / per_card 1667.0 / MFU 12.17% / HBM 47.57 GB
 # ⇒ DDP（16 卡、跨机 UB allreduce + 梯度桶）净开销 ≈ +0.09%，与 profile 里「通信净暴露 0.33%」一致
 # ⇒ 反向里的 490 次 Cast（123.3 ms）不是 DDP 造成，只能来自 autograd 内部（每算子/每权重的 dtype 往返）
+
+## E7 _project_one 去 cat（ONETRANS_CAT_INPLACE=1，预分配+原地写）—— 有效
+# 8die 同档 profile 逐算子: Cat_ConcatD 51.4→7.8 / Cat_Cast 42.2→6.4 / InplaceCopy_Cast 143.1→78.5 / InplaceCopy_Transpose 76.6→26.6
+#                           新增 FA附属转置 0→27.9 / ViewCopy 32.1→54.7 / TensorMove 2.1→24.0 ; 整步 1235.1→1121.7 ms (−113.4)
+# 16die 档A: 1228.6 → 1112.1 ms (−9.48%), 26671.4 → 29465.3 sps (+10.48%), MFU 12.17→13.44%
+# 16die 档B: 959.2 → 892.5 ms (−6.95%), 34161.9 → 36716.4 sps (+7.48%), MFU 15.58→16.75%, HBM 70.17 GB
+# 精度: 非逐位(布局改变 ⇒ 下游 kernel 分块/累加顺序变), loss 相对差 ≤2e-4 (step0 一致 0.69804; step1 1.26852 vs 1.26844; step3 1.06913 vs 1.06892)
+# 累计起点 1942.1ms/16872.3sps/MFU7.70% → 档A 1112.1(−42.74%/+74.63%) / 档B 892.5(−54.04%/+117.62%) ; 对论文 407ms: 2.73x / 2.19x
