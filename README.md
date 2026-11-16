@@ -205,6 +205,29 @@ per-GPU 轴**，只能在「全局 batch 对齐」这一轴上比；② 数学�
 实测 loss 相对差 ≤2e-4（step1 1.26852 vs 1.26844、step3 1.06913 vs 1.06892，step0 完全一致 0.69804）⇒
 属 **bf16 噪声级等价**，可用作性能档，不可用作精度基线。
 
+### 3.7 第四步：权重 bf16 影子（`ONETRANS_WEIGHT_SHADOW=1`）—— 逐位等价，但**无收益**
+
+autocast 每次 `F.linear`/`bmm` 都把 fp32 权重现 cast 一遍（重算 + 累加下同一权重每步要被 cast 三次）。
+`ONETRANS_WEIGHT_SHADOW=1` 按 `(param, 切片)` 缓存一份 bf16 权重，每步每权重只 cast 一次；缓存的张量仍接在原
+Parameter 的计算图上（`p[idx].transpose(...).to(bf16)`），因此 DDP 梯度同步、激活重算、梯度累加语义都不变。
+
+**精度**：UT（`tools/probes/ut_weight_shadow_equiv.py`，NPU 上跑 2 步 × 2 micro-batch，含 AdamW）
+loss 与全部 41 个参数梯度**逐位相同（rel = 0）**。
+踩坑一条：bmm 路径的 **bias 必须保持 fp32** —— baseline 的 `bf16 权重乘积 + fp32 bias` 走 type-promotion
+在 fp32 域相加，把 bias 一起 cast 成 bf16 会改成 bf16 域加法，实测差 1 ULP（9.766e-04）。
+
+**性能（16 die，n=8）**：
+
+| 档 | 不开 | 开 | Δ | HBM |
+|---|---:|---:|---:|---:|
+| A（每卡 2048+重算） | 1,112.1 ms | 1,110.4 ms | **−0.15%** | 47.57 → 47.74 GB |
+| B（每卡 1024×2 无重算） | 892.5 ms | 893.0 ms | **+0.06%** | 70.17 → 69.93 GB |
+
+**判定：无效（低于 1% 门槛），默认关。** kerenel 侧证据（8 die 同档 profile）：kernel 总数 2,862 → 2,693（−169/步）、
+名字含 `Cast` 的算子 665 → 552 次，但 **Cast 总时长只从 84.8 ms 掉到 84.5 ms（−0.3 ms）**
+⇒ 被删掉的是「权重级小 cast」（每次约 0.02 ms），剩下的 ~78 ms 全是大张量**激活** cast（544 次、平均 0.14 ms），
+与权重无关。**这条实测否掉了「影子权重能吃掉反向 Cast」的预估（原先估上限 ~7%，实际 ~0.03%）。**
+
 ## 4. 与论文 H100 对比（按**全局 batch = 32,768** 对齐）
 
 > 主对比档已叠加 `ONETRANS_NS_BMM=1`（从 zeus-onetrans 移植的 ns-layout 优化，数学等价、UT 通过；逐项判定见 `docs/OPT_PORT_FROM_ZEUS.md`，实测见 §3.3）。

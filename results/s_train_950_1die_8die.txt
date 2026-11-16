@@ -227,3 +227,10 @@ torch.OutOfMemoryError: NPU out of memory. Tried to allocate 2.34 GiB (NPU 0; 91
 # 16die 档B: 959.2 → 892.5 ms (−6.95%), 34161.9 → 36716.4 sps (+7.48%), MFU 15.58→16.75%, HBM 70.17 GB
 # 精度: 非逐位(布局改变 ⇒ 下游 kernel 分块/累加顺序变), loss 相对差 ≤2e-4 (step0 一致 0.69804; step1 1.26852 vs 1.26844; step3 1.06913 vs 1.06892)
 # 累计起点 1942.1ms/16872.3sps/MFU7.70% → 档A 1112.1(−42.74%/+74.63%) / 档B 892.5(−54.04%/+117.62%) ; 对论文 407ms: 2.73x / 2.19x
+
+## E11 权重 bf16 影子（ONETRANS_WEIGHT_SHADOW=1，逐位等价）—— 无效
+# 16die 档A: 1112.1 → 1110.4 ms (−0.15%), HBM 47.57→47.74 GB
+# 16die 档B: 892.5 → 893.0 ms (+0.06%), HBM 70.17→69.93 GB
+# UT(NPU, 2步x2accum, AdamW): loss 与 41/41 参数梯度逐位相同(rel=0); 踩坑 bmm bias 须留 fp32(type promotion)
+# profile(8die): kernel 2862→2693(−169/步), 含 Cast 算子 665→552 次, 但 Cast 时长 84.8→84.5 ms(−0.3 ms)
+# ⇒ 删掉的是权重级小 cast(~0.02ms/次), 大头是大张量激活 cast(544次, 0.14ms/次); 上限实际 ~0.03%, 撤回「~7%」预估

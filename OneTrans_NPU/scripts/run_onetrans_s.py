@@ -40,6 +40,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from models.taac_onetrans import TAACOneTransClassifier, linear_pyramid_schedule
+import main_pytorch
 import npu_compat
 
 # 论文 OneTrans-S 默认形状（§4.1.4 + Table 2）
@@ -138,7 +139,7 @@ def main() -> None:
         f" (multi={args.multi_num}) seq={args.seq_len} ns={args.ns_len} sep={args.use_sep_token} total={total_tokens}")
     log(f"[shape] pyramid_schedule={schedule}")
     log(f"[shape] params={n_params:,} ({n_params/1e6:.2f} M)")
-    log(f"[run] amp={use_amp} input_dtype={in_dtype} dtype={args.amp_dtype} mask={args.mask_type} attn_mask_env={os.environ.get('ONETRANS_ATTN_MASK')}"
+    log(f"[run] amp={use_amp} input_dtype={in_dtype} dtype={args.amp_dtype} mask={args.mask_type} attn_mask_env={os.environ.get('ONETRANS_ATTN_MASK')} weight_shadow={main_pytorch._WEIGHT_SHADOW}"
         f" per_card_micro_batch={args.batch_size} grad_accum={args.grad_accum}"
         f" per_card_batch={args.batch_size * args.grad_accum} global_batch={args.batch_size * world_size * args.grad_accum}"
         f" ckpt_act={args.checkpoint_act}")
@@ -195,6 +196,7 @@ def main() -> None:
                 scaler.update()
             else:
                 opt.step()
+        main_pytorch.clear_weight_shadow_cache()   # 权重已更新 / 前向图已用完 ⇒ 下一步重新 cast
         if device_type == "npu":
             torch.npu.synchronize()
         dt = (time.perf_counter() - t0) * 1000

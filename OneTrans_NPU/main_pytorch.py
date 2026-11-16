@@ -20,6 +20,36 @@ _CKPT_SCOPE = os.environ.get("ONETRANS_CKPT_SCOPE", "all").lower()
 _FUSED_NORM = os.environ.get("ONETRANS_FUSED_NORM", "0") == "1"
 # [E7] _project_one 的 seq/ns 合并：cat → 预分配 + 原地写入（逐位等价，只改内存写路径）
 _CAT_INPLACE = os.environ.get("ONETRANS_CAT_INPLACE", "0") == "1"
+# [E11] 权重影子：autocast 会在每次 F.linear 调用时把 fp32 权重 cast 一遍，重算/累加下同一份权重要 cast 3 次。
+# 这里按 (param, 切片) 在一个 step 内复用同一份 bf16 权重 ⇒ 每个权重每步只 cast 一次。
+# 影子靠在原 Parameter 的计算图上（p[idx].to(bf16)），不新增叶子张量 ⇒ DDP 梯度同步、激活重算、
+# 梯度累加语义全部不变；step 结束时清缓存。数值上与 autocast 的 cast 逐位相同（同为 rne 舍入）。
+_WEIGHT_SHADOW = os.environ.get("ONETRANS_WEIGHT_SHADOW", "0").lower() not in ("", "0", "false", "no")
+_SHADOW_CACHE: dict = {}
+
+
+def _wget(p, key, getter):
+    """同一 step 内同一份权重只 cast 一次；返回的张量仍连在原 Parameter 的计算图上。"""
+    if not _WEIGHT_SHADOW:
+        return getter()
+    k = (id(p), key)
+    t = _SHADOW_CACHE.get(k)
+    if t is None:
+        t = getter().to(torch.bfloat16)
+        _SHADOW_CACHE[k] = t
+    return t
+
+
+def clear_weight_shadow_cache() -> None:
+    _SHADOW_CACHE.clear()
+
+
+def _lin(m, x):
+    return torch.nn.functional.linear(
+        x,
+        _wget(m, "w", lambda: m.weight),
+        None if m.bias is None else _wget(m, "b", lambda: m.bias),
+    )
 
 
 class FFNLayer(nn.Module):
@@ -40,10 +70,10 @@ class FFNLayer(nn.Module):
                 # 预分配输出 + 原地写分片：避免 torch.cat 再复制一份整张量（4096 时约省 2.5 GiB）
                 out = torch.empty_like(flat)
                 for s in range(0, flat.shape[0], n_chunk):
-                    out[s : s + n_chunk] = self.act(self.proj_2(self.act(self.proj_1(flat[s : s + n_chunk]))))
+                    out[s : s + n_chunk] = self.act(_lin(self.proj_2, self.act(_lin(self.proj_1, flat[s : s + n_chunk]))))
                 return out.view(shape)
-        x = self.act(self.proj_1(x))
-        x = self.act(self.proj_2(x))
+        x = self.act(_lin(self.proj_1, x))
+        x = self.act(_lin(self.proj_2, x))
         return x
 
 
@@ -151,7 +181,11 @@ class CausalMaskAttention(nn.Module):
 
     def _cal_kqv(self, x: torch.Tensor, group_idx: int, proj_idx: int) -> torch.Tensor:
         if self.use_bmm:
-            return torch.nn.functional.linear(x, self.kqv_w[group_idx, proj_idx], self.kqv_b[group_idx, proj_idx])
+            return torch.nn.functional.linear(
+                x,
+                _wget(self.kqv_w, (group_idx, proj_idx), lambda: self.kqv_w[group_idx, proj_idx]),
+                _wget(self.kqv_b, (group_idx, proj_idx), lambda: self.kqv_b[group_idx, proj_idx]),
+            )
         return self.kqv_list[group_idx][proj_idx](x)
 
     def _project_one(self, x: torch.Tensor, proj_idx: int) -> torch.Tensor:
@@ -163,9 +197,12 @@ class CausalMaskAttention(nn.Module):
                 parts.append(self._cal_kqv(x[:, :seq_len, :], shared_group_idx, proj_idx))
             if self.ns_len > 0:
                 ns_in = x[:, seq_len:, :].permute(1, 0, 2)                     # (ns, B, d)
-                w = self.kqv_w[: self.ns_len, proj_idx]                        # (ns, d, d)
-                b = self.kqv_b[: self.ns_len, proj_idx].unsqueeze(1)           # (ns, 1, d)
-                parts.append((torch.bmm(ns_in, w.transpose(1, 2)) + b).permute(1, 0, 2))  # (B, ns, d)
+                # 注意：影子缓存的必须是「已转置」的张量——autocast 也是先 transpose 再 cast，
+                # 两者布局一致才逐位相同（先 cast 后 transpose 会得到另一种 stride，bmm 分块不同 ⇒ 差 1 ULP）。
+                w = _wget(self.kqv_w, ("nsT", proj_idx),
+                          lambda: self.kqv_w[: self.ns_len, proj_idx].transpose(1, 2))         # (ns, d, d)^T
+                b = self.kqv_b[: self.ns_len, proj_idx].unsqueeze(1)   # bias 保持 fp32：与 baseline 的 fp32 加法逐位一致
+                parts.append((torch.bmm(ns_in, w) + b).permute(1, 0, 2))  # (B, ns, d)
             if len(parts) == 1:
                 return parts[0]
             if _CAT_INPLACE:
@@ -211,7 +248,7 @@ class CausalMaskAttention(nn.Module):
         )
         output = output.transpose(1, 2).contiguous()
         output = output.view(output.size(0), -1, self.d_model)
-        return self.dense(output)
+        return _lin(self.dense, output)
 
 
 class OneTransBlock(nn.Module):
@@ -261,9 +298,17 @@ class OneTransBlock(nn.Module):
     def _ffn_one(self, x: torch.Tensor, gi: int) -> torch.Tensor:
         if self.use_bmm:
             h = torch.nn.functional.silu(
-                torch.nn.functional.linear(x, self.ffn_w1[gi], self.ffn_b1[gi]))
+                torch.nn.functional.linear(
+                    x,
+                    _wget(self.ffn_w1, (gi,), lambda: self.ffn_w1[gi]),
+                    _wget(self.ffn_b1, (gi,), lambda: self.ffn_b1[gi]),
+                ))
             return torch.nn.functional.silu(
-                torch.nn.functional.linear(h, self.ffn_w2[gi], self.ffn_b2[gi]))
+                torch.nn.functional.linear(
+                    h,
+                    _wget(self.ffn_w2, (gi,), lambda: self.ffn_w2[gi]),
+                    _wget(self.ffn_b2, (gi,), lambda: self.ffn_b2[gi]),
+                ))
         return self.ffn_list[gi](x)
 
     def cal_mix_param_ffn(self, x: torch.Tensor) -> torch.Tensor:
@@ -275,8 +320,14 @@ class OneTransBlock(nn.Module):
             if self.use_bmm:
                 ns_in = x[:, seq_len:, :].permute(1, 0, 2)                    # (ns, B, d)
                 h = torch.nn.functional.silu(
-                    torch.bmm(ns_in, self.ffn_w1[: self.ns_len].transpose(1, 2)) + self.ffn_b1[: self.ns_len].unsqueeze(1))
-                o = torch.bmm(h, self.ffn_w2[: self.ns_len].transpose(1, 2)) + self.ffn_b2[: self.ns_len].unsqueeze(1)
+                    torch.bmm(
+                        ns_in,
+                        _wget(self.ffn_w1, ("nsT",), lambda: self.ffn_w1[: self.ns_len].transpose(1, 2)),
+                    )
+                    + self.ffn_b1[: self.ns_len].unsqueeze(1))   # bias 保持 fp32（同 kqv）
+                o = torch.bmm(
+                    h, _wget(self.ffn_w2, ("nsT",), lambda: self.ffn_w2[: self.ns_len].transpose(1, 2))
+                ) + self.ffn_b2[: self.ns_len].unsqueeze(1)
                 res.append(torch.nn.functional.silu(o).permute(1, 0, 2))      # (B, ns, d)
             else:
                 for i in range(self.ns_len):
