@@ -71,8 +71,10 @@
 - 其中 FA 前向 **14 次/步**（= 7 个 block × 激活重算的第二次前向），FA 反向 7 次/步；matmul 306 次/步（同样含重算翻倍）。
 - 单个 FA 反向 22.7 ms、前向 7.7 ms/次（batch 2048）；batch 16 时前向仅 0.49 ms ⇒ 放大 128 倍 batch 只摊到 15.7 倍时间，说明**大 batch 下 FA 反而更“值”**，但反向仍是 attention 的大头。
 
-**B3. RMSNorm 是手写链，没走融合算子（≈43 ms/步 纯加性开销）**
-- `Square 27.9 + Pow 14.4 + Rsqrt 0.3` = **42.6 ms/步、n=28/步**（28 = 7 block × 2 norm × 2 次前向），另有 ReduceSum/Mul 中的对应份额。
+**B3. RMSNorm 是手写链，没走融合算子（整条链 ≈280 ms/步，19%）**
+- ~~`Square 27.9 + Pow 14.4 + Rsqrt 0.3` = 42.6 ms/步~~ ← **本节初版低估 6 倍，已由 Round1 实验证伪并更正**：
+  同属该链的还有 `Mul 151.6`、`Divs 22.2`、`Mean 13.1`、`Muls 14.0`、`ReduceSum 份额`、`Add 份额`；
+  换成 `npu_rms_norm` 后这组算子整体消失，16 die 实测 **−227.8 ms/步（−14.90%）**。证据见 `docs/OPT_ROUND1_RESULTS.md` §2。
 - 容器内 `torch_npu` 已有 `npu_rms_norm` / `npu_rms_norm_backward` / **`npu_add_rms_norm`（残差加 + norm 一起融合）**，本仓一个都没用。
 
 **B4. 激活重算把前向整体算了两遍**

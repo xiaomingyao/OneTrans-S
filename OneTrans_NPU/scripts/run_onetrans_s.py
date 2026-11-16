@@ -88,6 +88,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--profile-dir", default=None, help="给了就在 rank0 上抓 profile（只在计时段，跳过 warmup）")
     p.add_argument("--profile-steps", type=int, default=2, help="抓几个稳态步")
     p.add_argument("--profile-with-stack", action="store_true", help="记录调用栈（可按代码位置归因算子）")
+    p.add_argument("--ddp-strict", action="store_true", help="find_unused_parameters=False（bmm 模式下全部参数都参与）")
     return p.parse_args()
 
 
@@ -151,7 +152,7 @@ def main() -> None:
 
     model = nn.parallel.DistributedDataParallel(
         model, device_ids=[local_rank] if device_type == "npu" else None,
-        find_unused_parameters=True, broadcast_buffers=False,
+        find_unused_parameters=not args.ddp_strict, broadcast_buffers=False,
     ) if world_size > 1 else model
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)

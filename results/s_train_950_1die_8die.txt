@@ -177,3 +177,22 @@ torch.OutOfMemoryError: NPU out of memory. Tried to allocate 2.34 GiB (NPU 0; 91
 # Δ = +0.03%（在抖动内，判「无效」）；loss 轨迹几乎一致（step7 0.70894 vs 0.70789 = 0.15%，step9 0.72375 vs 0.72374）
 # 自纠: 方案里 E1a 预估 30~60 ms 过高 —— 归因错在「把 Cast 185.4 ms 整桶都算到 norm dtype 头上」；
 #       norm 输出提升只对应 28 次 cast/步，而实测 Cast 是 677 次/步 ⇒ 大头在别处（待 with_stack profile 归因）
+
+## Round1 实验（2026-11-16 21:55-22:05，16 die = 122+111，全局 32,768，n=8 中位）
+## E1b 融合 rms_norm（ONETRANS_FUSED_NORM=1）—— 有效
+[perf] A ns_bmm:               steady_median_step_ms=1443.9 global_sps=22694.9 per_card=1418.4 mfu=10.35% hbm=52.27 GB kernels=3083/步
+[perf] B ns_bmm+fused_norm:    steady_median_step_ms=1228.6 global_sps=26671.4 per_card=1667.0 mfu=12.17% hbm=47.57 GB kernels=2762/步
+# Δ: 步时 −14.90% / 吞吐 +17.52% / MFU +1.82pp / HBM −4.70 GB / kernel −321
+# 精度（tools/probes/probe_fused_norm.py, b64/seq1203）: fused max_rel 3.891e-03 rms 1.655e-03 vs manual 7.704e-03 2.347e-03 ⇒ 融合更准
+# 逐算子（A→B, ms/步）: Mul 151.6→0 / Square 27.9→0 / Divs 22.2→0 / Pow 14.4→0 / Mean 13.1→0 / Muls 14.3→0.3 / ReduceSum 32.2→19.1
+#                        / Add 130.8→109.0 ；新增 RmsNorm 29.7 + RmsNormGrad 35.1 ⇒ 净 ≈ −213 ms
+## E4 --ddp-strict（find_unused_parameters=False）—— 无效
+[perf] B+fused+ddp_strict:     steady_median_step_ms=1228.7 (+0.01%)
+## E5 只重算 FFN（ONETRANS_CKPT_SCOPE=ffn）—— OOM
+# NPU out of memory. Tried to allocate 1.43 GiB (91.75 GiB total; 82.48 GiB already allocated)
+## 阶段拆分（8 die · 每卡 2048，tools/probes/probe_phase_split.py）
+[phase] median ms: fwd=346.2 bwd=1093.2 opt=3.4 zero=0.2 total=1443.4  （fwd 24.0% / bwd 75.7% / opt 0.2%）
+## 重算代价（同形状 b1024 对照）
+[phase] 不重算: fwd=175.4 bwd=393.3 total=573.0 ; 重算: fwd=174.6 bwd=550.7 total=729.7
+# ⇒ 重算成本 = bwd +157.4 ms / 整步 +156.7 ms（+27.3%）；折到 2048 档 ≈346 ms ≈ 24% 步时，且落在 bwd 内
+## 自纠：PROFILE 文档 §3-B3 曾估「手写 norm 链 42.6 ms/步」，实测整链 ≈280 ms（Mul 单项就 151.6）——低估 6 倍，已更正

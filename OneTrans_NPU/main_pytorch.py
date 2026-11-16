@@ -14,6 +14,10 @@ VALID_MASK_TYPES = {"paper_causal", "origin", "hard_mask", "bimask_soft", "bimas
 _SQRT5 = math.sqrt(5.0)
 # [E1a] norm 在 fp32 域内乘 weight，输出回 bf16（去掉 fp32 激活与下游重复 cast）。默认关。
 _RMS_FP32_OUT = os.environ.get("ONETRANS_RMS_DTYPE", "0") == "1"
+# [E5] 激活重算的作用域：all（默认）/ ffn / attn
+_CKPT_SCOPE = os.environ.get("ONETRANS_CKPT_SCOPE", "all").lower()
+# [E1b] 用昇腾融合 rms_norm 算子替代手写链（Square+Pow+ReduceSum+Rsqrt+Mul）
+_FUSED_NORM = os.environ.get("ONETRANS_FUSED_NORM", "0") == "1"
 
 
 class FFNLayer(nn.Module):
@@ -48,6 +52,12 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if _FUSED_NORM:
+            # E1b：gamma 按输入 dtype 参与，内部 fp32 归一化。实测比手写链更接近 fp64
+            #（max_rel 3.891e-03 vs 7.704e-03，b64/seq1203 单算子 0.063 ms vs 0.205 ms）
+            import torch_npu  # noqa: PLC0415
+
+            return torch_npu.npu_rms_norm(x, self.weight.to(x.dtype), self.eps)[0]
         input_dtype = x.dtype
         x_fp32 = x.float()
         rms = x_fp32.pow(2).mean(dim=-1, keepdim=True).add(self.eps).rsqrt()
@@ -265,26 +275,34 @@ class OneTransBlock(nn.Module):
                     res.append(self.ffn_list[i](x[:, start : start + 1, :]))
         return res[0] if len(res) == 1 else torch.cat(res, dim=1)
 
-    def _forward_impl(self, x: torch.Tensor) -> torch.Tensor:
+    def _attn_part(self, x: torch.Tensor) -> torch.Tensor:
         x = self.rms_0(x)
         k_x, q_x, v_x = x, x, x
         if self.pyramid_stack_len is not None and self.pyramid_stack_len >= self.ns_len:
             q_x = x[:, -self.pyramid_stack_len :, :]
         origin_x = q_x
-
         x = self.cma((k_x, q_x, v_x))
-        x = origin_x + x
-        origin_x = x
+        return origin_x + x
 
+    def _ffn_part(self, x: torch.Tensor) -> torch.Tensor:
+        origin_x = x
         x = self.rms_1(x)
         x = self.cal_mix_param_ffn(x)
-        x = origin_x + x
-        return x
+        return origin_x + x
+
+    def _forward_impl(self, x: torch.Tensor) -> torch.Tensor:
+        return self._ffn_part(self._attn_part(x))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.use_checkpoint and self.training:
-            return checkpoint(self._forward_impl, x, use_reentrant=False)
-        return self._forward_impl(x)
+        ck = self.use_checkpoint and self.training
+        if not ck or _CKPT_SCOPE == "all":
+            return checkpoint(self._forward_impl, x, use_reentrant=False) if ck else self._forward_impl(x)
+        # [E5] 选择性重算：只重算 attention 或只重算 FFN（算子序列与 _forward_impl 完全一致 ⇒ 逐位等价）
+        if _CKPT_SCOPE == "ffn":
+            return checkpoint(self._ffn_part, self._attn_part(x), use_reentrant=False)
+        if _CKPT_SCOPE == "attn":
+            return self._ffn_part(checkpoint(self._attn_part, x, use_reentrant=False))
+        raise ValueError(f"ONETRANS_CKPT_SCOPE 只能是 all/ffn/attn，收到 {_CKPT_SCOPE!r}")
 
 
 class MultiOneTransBlock(nn.Module):
