@@ -1,0 +1,27 @@
+# OneTrans-S 形状下 attention 落到哪个昇腾算子（FAv4 核对）
+# 采集：2026-11-16，122 节点容器 zeus-950-v2，1 die（ASCEND_RT_VISIBLE_DEVICES=0）
+# 形状：S 形状（d=256 / heads=4 / ffn=1536 / seq=1190 / ns=12 / pyramid 6 段 / [SEP]=1）
+# 口径：ONETRANS_ATTN_MASK=bool；batch=16（只为抓算子名，**time 不可与 batch 2048 的步时比**）；
+#       profile 3 个训练步（fwd+bwd+AdamW），CSV = results/kernel_details_fa_probe_b16.csv
+# 命令：ONETRANS_ATTN_MASK=bool python3 tools/probes/probe_fa_kernel_s.py --batch 16 --steps 3
+
+## 结论：VERDICT = FAV4=YES（前向 fwd 与反向 grad 都是 V4 融合算子）
+[FA 核心算子]                                  次数(3步)   合计 us   每步 us   每步次数
+aclnnFlashAttentionScoreV4_...                 21        1460.4     486.8      7.0
+aclnnFlashAttentionScoreGradV4_...             21        4255.8    1418.6      7.0
+[FA 附属 Transpose]
+aclnnFlashAttentionScoreGradV4_TransposeAiCore  84         918.7     306.2      28.0
+aclnnFlashAttentionScoreV4_TransposeAiCore      63         639.7     213.2      21.0
+attention 相关合计/步                                                    2424.9 us
+
+## 判据三条（都从同一份 kernel_details.csv 数出来）
+1. 前向 7 次/步、反向 7 次/步 = 7 个 block（1 个 base + 6 个 pyramid 段）各一次，**无重复调用**。
+2. 全程**没有** attention 手工拆解路径：CSV 里 `Softmax` 只出现在交叉熵（`aclnnLogSoftmax` 3 次 = 1 次/步、3.2 us/步），
+   不存在 `BatchMatMul + Softmax` 的注意力组合 ⇒ 不是 float 加性 mask 的回退链。
+3. 该 CSV 内总 kernel 时间 104,039 us / 3 步 = 34.7 ms/步（batch 16）⇒ attention 占 **7.0%**；
+   其中反向占 58%（1418.6 vs 486.8 us），另有 519 us/步的 Transpose 开销（附在 FA 前后）。
+
+## 顺带观察（未优化，仅记录）
+- 耗时第一名是 `aclnnInplaceCopy_CastAiCore_Cast`：5,939 us/步（17.8 ms/3 步），占总 kernel 时间 17%
+  ⇒ bf16/fp32 转换（autocast 边界 + 优化器状态回写）是下一步的显式靶子。
+- 第二名 `aclnnMm_MatMulV3Common`：3,894 us/步。

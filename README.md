@@ -89,6 +89,25 @@ git -C GPU_Reference status --porcelain    # 空 = 未改动
 
 原始日志：`results/s_train_950_1die_8die.txt`（含每步 ms / loss / OOM 原始报错）。
 
+### 3.2 算子落点核对：attention 走 **FAv4 融合算子**（2026-11-16）
+
+用 profiler 抓 S 形状下一个训练步（batch 16，仅为抓算子名，耗时不可与 batch 2048 的步时比），同一份 `kernel_details.csv` 里数出来：
+
+| 算子 | 每步次数 | 每步耗时 |
+|---|---:|---:|
+| `aclnnFlashAttentionScoreV4`（前向） | 7.0 | 486.8 µs |
+| `aclnnFlashAttentionScoreGradV4`（反向） | 7.0 | 1,418.6 µs |
+| 附带的 `Transpose`（FA 前后） | 49 | 519.4 µs |
+| **attention 合计** | — | **2,424.9 µs** |
+
+判据：① 前向/反向各 **7 次/步 = 7 个 block**（1 base + 6 pyramid 段）各一次；② CSV 里 `Softmax` 只出现在交叉熵（`LogSoftmax` 1 次/步、3.2 µs），**不存在 `BatchMatMul+Softmax` 的注意力回退链** ⇒ 不是 float 加性 mask 的手工路径；③ 该 CSV 内 attention 占总 kernel 时间 **7.0%**，反向占主导（1,418.6 vs 486.8 µs）。
+
+复现命令与原始 CSV：`tools/probes/probe_fa_kernel_s.py` + `results/kernel_details_fa_probe_b16.csv` + `results/fa_kernel_probe_950.txt`。
+
+**顺带发现（未优化，仅记录）**：同一份 profile 里 `Cast`（`aclnnInplaceCopy_CastAiCore`）5,939 µs/步、占总 kernel 17%，是第一大项；`MatMulV3` 其次 3,894 µs/步。要做 kernel 级优化，靶子在这里，而不是 attention。
+
+**embedding 说明**：本仓**没有稀疏嵌入表**（全仓零 `nn.Embedding` / `torchrec` / `hkv` / `tbe`），输入特征经 `nn.Linear` tokenizer 变 token，与论文 Table 2「Params 不含稀疏嵌入」的口径一致 ⇒ 不存在「TBE 还是 HKV」的选择（那两者只服务稀疏表；HKV/融合 EC 属于 `zeus-onetrans` 生产模型那条线）。
+
 ## 4. 与论文 H100 对比（按**全局 batch = 32,768** 对齐）
 
 ### 4.1 对齐轴（哪些对齐、哪些必须并列说明）
