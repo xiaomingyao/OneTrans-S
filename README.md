@@ -6,6 +6,17 @@
 > 状态：形状已对齐（参数量 `91,026,946` vs 论文 91 M，+0.03%），**1 / 8 / 16 die（跨机 122+111）已实测**；**结构等价性未闭合**（§5）。
 > 论文归档 `papers/OneTrans_2510.26104v3.pdf`；话题与证据链 `docs/TOPIC_ONETRANS_S.md`；原始日志 `results/`。
 
+**交付文档（全部 Markdown，GitHub 直接渲染）**
+
+| 文档 | 内容 |
+|---|---|
+| [`docs/OneTrans-S_950DT_Optimization_v2_20261116.md`](docs/OneTrans-S_950DT_Optimization_v2_20261116.md) | **总报告 v2**：双档主表、三波有效优化 + 一项无效、4 遍算力分解、瓶颈证据链、未闭合项、复现命令 |
+| [`docs/OPT_ROUND1_RESULTS.md`](docs/OPT_ROUND1_RESULTS.md) | Round1 逐项实验记录（E1a/E1b/E4/E5/E7/E9/E10/E11，含无效项留档与归因更正） |
+| [`docs/PLAN_OPT_ROUND1.md`](docs/PLAN_OPT_ROUND1.md) | 实验方案与验收门槛（单变量、同节点同档 A/B、≥1% 且大于极差、精度门禁先过） |
+| [`docs/PROFILE_16DIE_BOTTLENECK.md`](docs/PROFILE_16DIE_BOTTLENECK.md) | 16 卡 profile 全景与 4 条瓶颈（含 B3 低估 6 倍的更正） |
+| [`docs/OPT_PORT_FROM_ZEUS.md`](docs/OPT_PORT_FROM_ZEUS.md) | zeus-onetrans 8 项优化的逐项准入判定 |
+| [`docs/TOPIC_ONETRANS_S.md`](docs/TOPIC_ONETRANS_S.md) | 论文事实唯一真源（形状、Table 4/5 数字、口径） |
+
 ## 1. 这个仓做什么
 
 1. **复刻形状**：论文 OneTrans-S = 6 个堆叠 OneTrans block、d=256、H=4、序列 token 1190 → 12（每层对齐 32）、NS-token 12、per-GPU batch 2048。
