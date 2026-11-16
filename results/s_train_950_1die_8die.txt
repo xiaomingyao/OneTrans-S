@@ -157,3 +157,12 @@ torch.OutOfMemoryError: NPU out of memory. Tried to allocate 2.34 GiB (NPU 0; 91
 #   Communication_Error_Bind_IP_Port(EI0020): Failed to enable listening for the NPU network adapter socket.
 #   Reason: The IP address IpAddress[...df10:xxxx] and port 16666 have already been bound.
 #   与「该节点 die 已被他人作业占用」一致（未做隔离实验，因果标注为推测）
+
+## 16 卡整体收益复跑（2026-11-16 21:22，122+111 各 8 die，全局 32,768，n=8 步中位）
+# 两臂同节点同时段顺序跑，中间无他人作业；端口 29561 / 29563；无 Bind_IP_Port / Traceback
+[perf] A ns_bmm=0: steady_median_step_ms=1942.1 mean=1942.0 n=8 global_samples_per_s=16872.3 per_card=1054.5 mfu=7.70% hbm=52.30 GB
+[perf] B ns_bmm=1: steady_median_step_ms=1443.4 mean=1443.5 n=8 global_samples_per_s=22702.5 per_card=1418.9 mfu=10.36% hbm=52.27 GB
+# Δ: 步时 −25.68% / 全局吞吐 +34.55% / 每卡 1054.5→1418.9 / MFU 7.70→10.36%
+# 折算: 每 1e6 样本 59.3 s → 44.0 s；日处理 1.458e9 → 1.961e9 样本
+# 三轮一致性: 16die(21:06) 1942.0→1442.9 = −25.7% / 8die(21:15) 1952.1→1442.3 = −26.1% / 本轮 1942.1→1443.4 = −25.7%
+# 与论文 407 ms 并列: 1443.4/407 = 3.55×（口径不同，只并列不相除算收益）

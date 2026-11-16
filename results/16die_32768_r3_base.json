@@ -1,0 +1,39 @@
+{
+  "shape": {
+    "d_model": 256,
+    "heads": 4,
+    "ffn": 1536,
+    "blocks": 7,
+    "seq": 1190,
+    "ns": 12,
+    "schedule": [
+      1203,
+      960,
+      736,
+      480,
+      256,
+      12
+    ],
+    "params": 91026946
+  },
+  "run": {
+    "world_size": 16,
+    "per_card_micro_batch": 2048,
+    "grad_accum": 1,
+    "per_card_batch": 2048,
+    "global_batch": 32768,
+    "amp": true,
+    "dtype": "bf16",
+    "mask": "paper_causal"
+  },
+  "perf": {
+    "steady_median_step_ms": 1942.1128912363201,
+    "mean_step_ms": 1942.0054577640258,
+    "n": 8,
+    "global_samples_per_s": 16872.345653985325,
+    "hbm_peak_alloc_gb": 52.29991102218628,
+    "flops_per_sample": 31529400000.0,
+    "mfu_pct": 7.696396629958982,
+    "peak_tflops": 432.0
+  }
+}
