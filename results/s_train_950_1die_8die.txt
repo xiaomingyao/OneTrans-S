@@ -265,3 +265,10 @@ torch.OutOfMemoryError: NPU out of memory. Tried to allocate 2.34 GiB (NPU 0; 91
 # 16die 档A: 1112.1 → 1053.5 ms (−5.27%), 29465.3 → 31104.8 sps, MFU 13.44→14.19%
 # 16die 档B: 892.5 → 847.3 ms (−5.06%), 36716.4 → 38672.9 sps, MFU 16.75→17.64%
 # 累计: 1942.1 → 1053.5(−45.75%)/847.3(−56.37%); sps +84.35%/+129.20%; 对论文407ms 2.59x/2.08x
+
+## h 项 Triton 版实测（融合 残差加+RMSNorm，1 die, shape 1024x1203x256）
+# 基础设施可用: triton 3.2.0 (ascend backend) 编译/运行/正确性 OK; grid 上限 65535 ⇒ 每 program 处理 32 行(2D tile)
+# 精度: fwd max|Δ| 6.25e-2(bf16 ULP) mean rel 1.1e-3; bwd dx mean rel 1.5e-3 (npu_rms_norm 内部 fp32, 故略差)
+# 单次耗时(非 blocking): 现有 add+npu_rms_norm fwd 1.450 ms vs Triton 1.527 ms (+5.3%); bwd 2.915 vs 2.888 (−0.9%)
+# 结论: Triton 融合这条 2-op 链与厂商融合算子打平(前向更慢) ⇒ h 项在当前链路上无效, 不集成
+# 原因: baseline 已在 ~1.7 TB/s (HBM 上限附近), 合并两步只省一次 0.63GB 往返(≈0.4ms), Triton 无调度优势
