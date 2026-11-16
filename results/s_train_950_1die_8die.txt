@@ -213,3 +213,9 @@ torch.OutOfMemoryError: NPU out of memory. Tried to allocate 2.34 GiB (NPU 0; 91
 # Δ: 步时 −21.92% / 吞吐 +28.09% / MFU +3.41pp；显存 +23.09 GB（70.66/91.75，仍安全）
 # 口径: 全局 batch 与卡数完全一致（32,768 / 16 卡），只有「每卡 micro-batch 1024+累加2」与「是否重算」不同；
 #       loss 口径等价（各 micro-batch 取均值再除 accum ⇒ 与 2048 整批均值一致）
+
+## DDP 开销隔离（1 die · 每卡 2048 · ckpt · fused_norm，无 torchrun/world_size=1）
+[perf] steady_median_step_ms=1227.5 mean=1227.7 n=6 per_card_sps=1668.4 mfu=12.18% hbm=47.23 GB
+# 对照 16 die（同档）: 1228.6 ms / per_card 1667.0 / MFU 12.17% / HBM 47.57 GB
+# ⇒ DDP（16 卡、跨机 UB allreduce + 梯度桶）净开销 ≈ +0.09%，与 profile 里「通信净暴露 0.33%」一致
+# ⇒ 反向里的 490 次 Cast（123.3 ms）不是 DDP 造成，只能来自 autograd 内部（每算子/每权重的 dtype 往返）
