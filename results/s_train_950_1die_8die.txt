@@ -391,3 +391,15 @@ torch.OutOfMemoryError: NPU out of memory. Tried to allocate 2.34 GiB (NPU 0; 91
 # 向量侧已贴峰值: SiLU 3178 / Add 3222 / sum(0) 3189-3358 GB/s ⇒ 240ms ≈ 800GB/步 的必然结果，小算子优化无空间
 # Triton 元素级融合三次作废: 32MiB得4455GB/s(超峰值) → 2.52GB得213247GB/s(异步) → 逐次sync仍127781GB/s且 max|Δ|=0.00(empty_like 复用刚释放缓冲 ⇒ kernel 静默未执行)
 # 判据: 带宽>4000GB/s 直接 INVALID; 融合对拍必须预填垃圾值输出缓冲
+
+## FP8/INT8 可行性 (2026-11-17, 单 die 探针)
+# fp8: e4m3fn/e5m2 可创建(elem=1); *fnuz 不支持
+#   torch.mm(fp8) → 161002; torch._scaled_mm → 2166ms/0.3TF/s(回退路径,比 bf16 慢1350x); npu_quant_matmul(fp8) → 161002; FA(fp8) 不支持
+#   ⇒ FP8 在本栈无可用算子(非"效果一般")
+# int8: (1231872,256)@(256,1024)  bf16 1.604ms/403TF/s  vs  int8 npu_quant_matmul 0.805ms/802TF/s = 1.99x
+# 隔离 bf16 GEMM 正反两方向都到 376-427 TF/s(87-99% of 432) ⇒ 模型内 277 TF/s(64.3%) 不是形状问题, 是串行/交织
+# int8 精度(mean rel): per-tensor 4.63%(离群 8.36%) / per-token 3.10% / per-32block 2.46%; 端到端 matmul 6.01%/5.19%
+#   对照 O1 显式 bf16 的 0.61% ⇒ int8 再放大 5-10x, 属"换训练算法"不是优化
+# 双流 cube∥vector: 串行 2.192ms → 并发 2.102ms, 理想 1.604ms ⇒ 重叠效率仅 15%(与 profile: kernel 和 636.1 vs 并集 605.5 = 4.8% 一致)
+# 达标预算(vector 240 已贴峰值): bf16全100%=426ms(恰好达标) | int8只换GEMM=482 | int8+FA bwd45%=453 | 全int8=344(FA不支持)
+# ⇒ 427 在 bf16 下就是物理下界; 最值得做的是"为什么模型内 GEMM 只有 277 而隔离 400+"
