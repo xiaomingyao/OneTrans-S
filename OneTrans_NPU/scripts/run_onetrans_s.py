@@ -133,6 +133,8 @@ def main() -> None:
     rank, world_size, local_rank = npu_compat.init_distributed()
     if world_size > 1:
         args.device = f"{device_type}:{local_rank}"
+    # 表后端（ec / dynamic_emb）必须在**本 rank 的 die** 上建表，否则 gather 跨设备报错
+    os.environ["ONETRANS_NS_DEVICE"] = str(args.device)
     is_main = rank == 0
     log = print if is_main else (lambda *a, **k: None)
 

@@ -84,7 +84,7 @@ class TAACOneTransClassifier(nn.Module):
             if _dev_s:
                 _ns_dev = torch.device(_dev_s)
             elif hasattr(torch, "npu") and torch.npu.is_available():
-                _ns_dev = torch.device("npu:0")
+                _ns_dev = torch.device(f"npu:{torch.npu.current_device()}")
             else:
                 _ns_dev = torch.device("cpu")
         self.non_seq_tokenizer = build_ns_tokenizer(
@@ -136,6 +136,9 @@ class TAACOneTransClassifier(nn.Module):
         batch_size = non_seq_x.size(0)
         with _RF("P_embed") if _mk else _null():
             _t = self.non_seq_tokenizer(non_seq_x)      # linear: [B,ns,d]；表后端: 同样 [B,ns,d]
+            # 表后端输出恒为 fp32（表精度），显式 bf16 干路下需转成主干 dtype；
+            # 该 cast 的反向会把梯度还原成 fp32，表侧不受影响。
+            _t = _t.to(self.seq_tokenizer.weight.dtype)
             ns_tokens = _t.view(batch_size, self.ns_len, -1)
         with _RF("P_embed") if _mk else _null():
             seq_tokens = self.seq_tokenizer(seq_x)
