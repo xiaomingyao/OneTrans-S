@@ -302,3 +302,11 @@ torch.OutOfMemoryError: NPU out of memory. Tried to allocate 2.34 GiB (NPU 0; 91
 # 16die 档A baseline 1053.5 / 31104.8 / 14.19% ; +两者 895.3 ms (-15.02%) / 36,601.7 / 16.70% / 47.85
 # 单die 合并 362.0 ms (-14.0% vs 421.1); 合并精度 max|Δg|=4.88e-4(1ULP) worst rel 1.15e-2 mean 6.2e-4 无NaN
 # 累计 起点1942.1 → 895.3(-53.90%)/730.0(-62.41%); sps +116.9%/+166.0%; 对论文407ms 2.20x/1.79x
+
+## 2026-11-17 重抓 profile（G1+G2+G3, 16die): 切片+散播链已被 G2 吃掉
+# 墙钟 730.3 / kernel 并集 725.8 / 4254 kernel/步
+# Slice 46.8→5.4, ViewCopy 45.4→4.9, FA 附属转置 32.0→14.8, Transpose 23.3→13.3, Zero 30.7→22.8
+# 剩余大头: FA bwd 131.4 / Mm 109.9 / Add 101.8(InplaceAdd 85.1+Add 16.7) / Cast 58.0(948) / Addmm 52.7 / FA fwd 41.0
+# 归因: Python层只发 to 14(权重cast)+narrow 6 ⇒ zeros/zero_/add_/sum/slice_backward 全来自 C++ autograd
+# 形状: slice_backward 102 次中 70 次是 12 行(NS)形状; _to_copy 448 次中约 220 次是 NS 形状, 其余 ~145 次是大激活 cast
+# 候选: O1 全线显式 bf16(norm 除外) -40~55ms; O2 NS 权重按组拆 Parameter -15~25ms; O3 accum 2→1 否决

@@ -170,3 +170,49 @@ ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 torchrun --nproc_per_node=8 scripts/ru
 python3 tools/probes/analyze_profile_deep.py results/prof_8die_trackB_kernel_details.csv \
   --operator results/prof_8die_trackB_operator_details.csv --step-ms 892.5 --per-card-batch 2048
 ```
+
+
+---
+
+## 7 追加（2026-11-17）：在 G1+G2+G3 配置下重抓的 profile —— 「切片+散播」链已基本消失
+
+16 die、当前最优配置（`SDPA_CAUSAL + FULL_PROJ + FA_BSH`）、3 稳态步：**墙钟 730.3 ms，kernel 并集 725.8 ms，4,254 kernel/步**。
+与只用 G1 时（墙钟 848.9 ms）逐项对比：
+
+| kernel | G1 | G1+G2+G3 | 变化 |
+|---|---:|---:|---:|
+| `InplaceCopy_Slice` | 46.8 (190) | **5.4 (106)** | **−41.4 ms** |
+| `InplaceCopy_ViewCopy` | 45.4 (318) | **4.9 (250)** | **−40.5 ms** |
+| FA 前向/反向附属 `Transpose` | 14.1 + 17.9 | 6.4 + 8.4 | −17.2 ms |
+| `InplaceCopy_Transpose` | 23.3 (334) | 13.3 (314) | −10.0 ms |
+| `InplaceZero` | 30.7 (588) | 22.8 (588) | −7.9 ms |
+| `InplaceCopy_TensorMove` | 24.9 (232) | 28.7 (244) | +3.8 ms |
+| `InplaceCopy_Cast` | 57.8 (924) | 58.0 (948) | +0.2 ms |
+| `Add`（InplaceAdd 85.1 + Add 16.7） | 101.4 (471) | 101.8 (471) | +0.4 ms |
+
+⇒ 原先估的「切片 + 散播 ≈110 ms」中约 **−100 ms 已由 G2（全量投影）吃掉**，剩下的分摊在别处。
+
+**新 profile 的构成（ms/步）**：FA 反向 131.4 ｜ Mm 109.9 ｜ **Add 101.8（InplaceAdd 85.1/373 + Add 16.7/98）** ｜ Cast 58.0（948）｜
+Addmm 52.7 ｜ FA 前向 41.0 ｜ RmsNorm 36.1+14.9 ｜ Silu 33.9+22.8 ｜ TensorMove 28.7 ｜ Zero 22.8（588）｜
+ReduceSum 20.6（158）｜ Transpose 13.3 ｜ FA 附属转置 14.8 ｜ Slice 5.4 ｜ ViewCopy 4.9。
+
+**归因（三支探针的结论，不是推测）**
+
+1. **Python 层零来源**：`tools/probes/probe_op_callers.py` 显示每步 Python API 只发 `to` 14 次（RMSNorm 每次把 fp32 权重 cast 成 bf16）、
+   `narrow` 6、`contiguous` 3 → **`zeros / zero_ / add_ / sum / slice_backward` 全部来自 C++ autograd 内部**（CopySlices、
+   slice_backward、梯度累加、DDP 桶），改 Python 调用点无效，只能改图结构。
+2. **形状归因**（`tools/probes/probe_cpu_shapes.py`，CPU 侧 aten + `record_shapes`）：
+   - `slice_backward` 102 次里 **70 次是 12 行形状**（`[12,3,256,256]`、`[12,1536,256]`、`[12,256,1536]`、`[12,128,256]` 等）
+     ⇒ 切片成本主要来自 **NS（12 token）权重/激活**，不是 q 的大切片（大切片每种只有 1 次）。
+   - `copy_` 832 次里 `[128,12,256]`（133）、`[12,128,256]`（84）、`[12,256,256]`（63）同样以 NS 形状为主。
+   - `_to_copy` 448 次里 **属于 NS 形状的约 220 次**（`[12,128,256]` 84、`[12,256,256]` 42、`[12,128,1536]` 21、`[12,256,1536]` 14、
+     `[12,1536,256]` 14 …），其余是 `[256]` 权重 70、`[256,256]` 56 与 seq 激活（`[128,1203,256]` 24 等）。
+3. 结论：**剩余开销分两类** ——（a）NS 路径的几百个小 kernel（每次几 µs，量大）；（b）seq 路径的大激活 cast（每次数百 µs，约 145 次、合计 ≈58 ms）。
+
+**下一批候选（按 机制确定度 × 收益 排序）**
+
+| 编号 | 改动 | 机制 | 预估 |
+|---|---|---|---|
+| O1 | 除 norm 外全线显式 bf16（干路激活不再走 autocast 边界），权重另存 fp32 master 供优化器 | 直接消灭 ~145 次大激活 cast（58 ms 中的大头） | −40~55 ms（5~7%），精度需门禁 |
+| O2 | NS 权重按组拆成独立 Parameter（13×3 与 FFN 两组），彻底不切参数 | 消灭 12 行形状的 slice_backward/zeros/copy（~70+ 次） | −15~25 ms（2~3%），改 state_dict 命名 |
+| O3 | 减少梯度累加节点（accum 2→1） | InplaceAdd 85 ms 里 162 次来自 2 个 micro-batch 的累加 | 需 per-GPU 2048 + 重算 = 档 A，整体更慢，否决 |
