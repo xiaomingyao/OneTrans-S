@@ -7,8 +7,13 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import html
+import mimetypes
+import os
 import re
+
+BASE_DIR = os.getcwd()   # main() 里改成被转 md 所在目录（用于内联本地图片）
 
 CSS = """
 body{font-family:"Microsoft YaHei","PingFang SC",-apple-system,Segoe UI,sans-serif;max-width:1180px;margin:0 auto;
@@ -142,6 +147,14 @@ def convert(md: str) -> str:
         m_img = re.match(r"^!\[([^\]]*)\]\(([^)]+)\)\s*$", ln.strip())
         if m_img:
             alt, src = m_img.group(1), m_img.group(2)
+            if not re.match(r"^(https?:|data:)", src):
+                # 本地图内联成 data URI：投递的是单文件 HTML，相对路径到接收方就是空白
+                fp = src if os.path.isabs(src) else os.path.join(BASE_DIR, src)
+                if os.path.exists(fp):
+                    mime = mimetypes.guess_type(fp)[0] or "image/png"
+                    src = f"data:{mime};base64," + base64.b64encode(open(fp, "rb").read()).decode()
+                else:
+                    print(f"[warn] 图片不存在，已跳过内联: {fp}")
             out.append(
                 f'<figure><img src="{html.escape(src)}" alt="{html.escape(alt)}" '
                 f'style="max-width:100%;height:auto">'
@@ -246,6 +259,8 @@ def main() -> None:
     ap.add_argument("html")
     ap.add_argument("--title", default="报告")
     a = ap.parse_args()
+    global BASE_DIR
+    BASE_DIR = os.path.dirname(os.path.abspath(a.md))
     body = convert(open(a.md, encoding="utf-8").read())
     doc = f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">
