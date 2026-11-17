@@ -32,6 +32,9 @@ from pathlib import Path
 # 950 实测 float 加性 mask 会让 SDPA 退回 Cast+Muls+BatchMatMul+Softmax 手工路径，
 # bool mask 才落 FlashAttentionScoreV4（见 docs/GPU_VS_NPU_CODE_IMPLEMENTATION.md）。
 os.environ.setdefault("ONETRANS_ATTN_MASK", "bool")
+# [O1] 显式 bf16 需要权重影子（main_pytorch 在 import 时读这些 env，必须早于下面的 import）
+if os.environ.get("ONETRANS_EXPLICIT_BF16", "0") == "1":
+    os.environ.setdefault("ONETRANS_WEIGHT_SHADOW", "1")
 
 import torch
 from torch import nn
@@ -124,9 +127,17 @@ def main() -> None:
     is_main = rank == 0
     log = print if is_main else (lambda *a, **k: None)
 
+    # [O1] 显式 bf16：关掉 autocast，激活/输入 /权重全 bf16，只有 norm 内部与 loss 保持 fp32。
+    # 目的：消灭 autocast 在「bf16 matmul ↔ fp32 逐元素」之间反复插入的激活 cast（16 die 上约 58 ms/步）。
+    explicit_bf16 = os.environ.get("ONETRANS_EXPLICIT_BF16", "0") == "1"
+    if explicit_bf16:
+        args.amp = False                      # 不再让 autocast 插手
+        args.input_dtype = "bf16"
+        os.environ.setdefault("ONETRANS_WEIGHT_SHADOW", "1")   # 权重用每步一次的 bf16 影子，图仍接在 fp32 参数上
     use_amp = npu_compat.should_enable_amp(device_type, args.amp, args.amp_dtype)
     # 输入按训练精度落地（bf16 时省一半输入显存：4096 batch 下 1190×64 token 张量 1.25 GiB → 0.62 GiB）
-    in_dtype = torch.bfloat16 if (args.input_dtype == "bf16" and use_amp and args.amp_dtype == "bf16") else torch.float32
+    in_dtype = (torch.bfloat16 if ((args.input_dtype == "bf16" and use_amp and args.amp_dtype == "bf16") or explicit_bf16)
+                else torch.float32)
     amp_dtype = torch.bfloat16 if args.amp_dtype == "bf16" else torch.float16
     scaler = npu_compat.build_scaler(device_type, use_amp, amp_dtype)
 
@@ -135,6 +146,7 @@ def main() -> None:
     total_tokens = args.ns_len + args.seq_len + (1 if args.use_sep_token else 0)
     schedule = linear_pyramid_schedule(total_tokens, args.ns_len, args.num_pyramid_layers, args.pyramid_align)
 
+    log(f"[mode] explicit_bf16={int(explicit_bf16)} weight_shadow={os.environ.get('ONETRANS_WEIGHT_SHADOW','0')}")
     log(f"[env] {npu_compat.describe(device_type)} dist=world_size={world_size} rank={rank} local_rank={local_rank}")
     log(f"[shape] d={args.d_model} heads={args.num_heads} ffn={args.ffn_hidden} blocks={1 + args.num_pyramid_layers}"
         f" (multi={args.multi_num}) seq={args.seq_len} ns={args.ns_len} sep={args.use_sep_token} total={total_tokens}")
@@ -192,6 +204,8 @@ def main() -> None:
             _nogr = torch.no_grad() if args.no_backward else contextlib.nullcontext()
             with _nogr, npu_compat.autocast_context(device_type=device_type, amp_dtype=amp_dtype, use_amp=use_amp):
                 logits = model(non_seq[lo:hi], seq[lo:hi])
+                if explicit_bf16:
+                    logits = logits.float()          # 只有这一步回到 fp32，一共 1 次/step
                 loss = crit(logits, labels[lo:hi]) / args.grad_accum
                 loss_item = loss.item() * args.grad_accum
             if not args.no_backward:

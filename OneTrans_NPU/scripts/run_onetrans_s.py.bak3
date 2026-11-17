@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import statistics
@@ -40,6 +41,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from models.taac_onetrans import TAACOneTransClassifier, linear_pyramid_schedule
+import main_pytorch
 import npu_compat
 
 # 论文 OneTrans-S 默认形状（§4.1.4 + Table 2）
@@ -89,6 +91,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--profile-steps", type=int, default=2, help="抓几个稳态步")
     p.add_argument("--profile-with-stack", action="store_true", help="记录调用栈（可按代码位置归因算子）")
     p.add_argument("--ddp-strict", action="store_true", help="find_unused_parameters=False（bmm 模式下全部参数都参与）")
+    p.add_argument("--no-backward", action="store_true", help="只跑前向（诊断 cast 归属用，不做训练）")
     return p.parse_args()
 
 
@@ -137,7 +140,7 @@ def main() -> None:
         f" (multi={args.multi_num}) seq={args.seq_len} ns={args.ns_len} sep={args.use_sep_token} total={total_tokens}")
     log(f"[shape] pyramid_schedule={schedule}")
     log(f"[shape] params={n_params:,} ({n_params/1e6:.2f} M)")
-    log(f"[run] amp={use_amp} input_dtype={in_dtype} dtype={args.amp_dtype} mask={args.mask_type} attn_mask_env={os.environ.get('ONETRANS_ATTN_MASK')}"
+    log(f"[run] amp={use_amp} input_dtype={in_dtype} dtype={args.amp_dtype} mask={args.mask_type} attn_mask_env={os.environ.get('ONETRANS_ATTN_MASK')} weight_shadow={main_pytorch._WEIGHT_SHADOW}"
         f" per_card_micro_batch={args.batch_size} grad_accum={args.grad_accum}"
         f" per_card_batch={args.batch_size * args.grad_accum} global_batch={args.batch_size * world_size * args.grad_accum}"
         f" ckpt_act={args.checkpoint_act}")
@@ -150,9 +153,16 @@ def main() -> None:
     seq = torch.randn(n_local, args.seq_len, args.seq_feat_dim, generator=gen).to(args.device, dtype=in_dtype)
     labels = torch.randint(0, args.num_classes, (n_local,), generator=gen).to(args.device)
 
+    # [D2a] 梯度桶直视图：省掉 DDP 把 bucket 再拷回 param.grad 的那一步（profile 里 InplaceAdd/copy 的一部分）
+    _bucket_view = os.environ.get("ONETRANS_DDP_BUCKET_VIEW", "0") == "1"
+    # [D5-lite] NPU JIT 图编译模式：让后端把相邻逐元素算子融合、摊薄 launch
+    if os.environ.get("ONETRANS_JIT_COMPILE", "0") == "1" and device_type == "npu":
+        torch.npu.set_compile_mode(jit_compile=True)
+        log("[run] jit_compile=True（NPU 图编译融合）")
     model = nn.parallel.DistributedDataParallel(
         model, device_ids=[local_rank] if device_type == "npu" else None,
         find_unused_parameters=not args.ddp_strict, broadcast_buffers=False,
+        gradient_as_bucket_view=_bucket_view,
     ) if world_size > 1 else model
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
@@ -179,19 +189,23 @@ def main() -> None:
         opt.zero_grad(set_to_none=True)
         for k in range(args.grad_accum):
             lo, hi = k * args.batch_size, (k + 1) * args.batch_size
-            with npu_compat.autocast_context(device_type=device_type, amp_dtype=amp_dtype, use_amp=use_amp):
+            _nogr = torch.no_grad() if args.no_backward else contextlib.nullcontext()
+            with _nogr, npu_compat.autocast_context(device_type=device_type, amp_dtype=amp_dtype, use_amp=use_amp):
                 logits = model(non_seq[lo:hi], seq[lo:hi])
                 loss = crit(logits, labels[lo:hi]) / args.grad_accum
                 loss_item = loss.item() * args.grad_accum
+            if not args.no_backward:
+                if scaler.is_enabled():
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
+        if not args.no_backward:
             if scaler.is_enabled():
-                scaler.scale(loss).backward()
+                scaler.step(opt)
+                scaler.update()
             else:
-                loss.backward()
-        if scaler.is_enabled():
-            scaler.step(opt)
-            scaler.update()
-        else:
-            opt.step()
+                opt.step()
+        main_pytorch.clear_weight_shadow_cache()   # 权重已更新 / 前向图已用完 ⇒ 下一步重新 cast
         if device_type == "npu":
             torch.npu.synchronize()
         dt = (time.perf_counter() - t0) * 1000

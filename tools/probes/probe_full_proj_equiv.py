@@ -23,10 +23,16 @@ os.environ.setdefault("ONETRANS_FUSED_NORM", "1")
 os.environ.setdefault("ONETRANS_CAT_INPLACE", "1")
 os.environ.setdefault("ONETRANS_SDPA_CAUSAL", "1")
 
+_EXPLICIT_BF16 = os.environ.get("ONETRANS_EXPLICIT_BF16", "0") == "1"
+if _EXPLICIT_BF16:
+    os.environ.setdefault("ONETRANS_WEIGHT_SHADOW", "1")
+
+import contextlib  # noqa: E402
 import torch  # noqa: E402
 import torch_npu  # noqa: E402,F401
 from torch import nn  # noqa: E402
 from models.taac_onetrans import TAACOneTransClassifier  # noqa: E402
+import main_pytorch as _MP  # noqa: E402
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--batch", type=int, default=1024)
@@ -63,10 +69,21 @@ def grad_digest():
                 dot=float((cat * probe).sum()), nan=bool(torch.isnan(cat).any()))
 
 
+_ctx = contextlib.nullcontext() if _EXPLICIT_BF16 else torch.autocast(DEV, dtype=torch.bfloat16)
+if _EXPLICIT_BF16:
+    ns = ns.bfloat16()
+    sq = sq.bfloat16()
+    model = model.bfloat16() if False else model      # 参数保持 fp32，权重由影子缓存 cast
+
+
 def one_step():
     opt.zero_grad(set_to_none=True)
-    with torch.autocast(DEV, dtype=torch.bfloat16):
-        loss = crit(model(ns, sq), y)
+    _MP.clear_weight_shadow_cache()      # 权重影子必须每步清（runner 里也是每步末清）
+    with _ctx:
+        logits = model(ns, sq)
+        if _EXPLICIT_BF16:
+            logits = logits.float()
+        loss = crit(logits, y)
     loss.backward()
     opt.step()
     return loss

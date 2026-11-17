@@ -20,6 +20,16 @@ _CKPT_SCOPE = os.environ.get("ONETRANS_CKPT_SCOPE", "all").lower()
 _FUSED_NORM = os.environ.get("ONETRANS_FUSED_NORM", "0") == "1"
 # [E7] _project_one 的 seq/ns 合并：cat → 预分配 + 原地写入（逐位等价，只改内存写路径）
 _CAT_INPLACE = os.environ.get("ONETRANS_CAT_INPLACE", "0") == "1"
+# [O1] 显式 bf16 模式：关掉 autocast 后，NS 路径的 fp32 bias 会把输出提升成 fp32（与 SDPA 的 bf16 k/v 冲突），
+# 该模式下 NS bias 一起落 bf16、RMSNorm 输出与残差流也落 bf16。默认关 ⇒ 既有路径逐位不变。
+_EXPLICIT_BF16 = os.environ.get("ONETRANS_EXPLICIT_BF16", "0") == "1"
+
+
+def _nsbias(b):
+    """NS 路径的 bias：显式 bf16 模式下必须与激活同 dtype，否则输出被 type-promotion 提成 fp32。"""
+    return b.to(torch.bfloat16) if _EXPLICIT_BF16 else b
+
+
 # [G3] attention 走 FA 的 BSH 布局：输入 (B,L,d)、输出也是 (B,L,d)，省掉 transpose(1,2)+contiguous 那次整张量往返。
 # 只用在 q_len != key_len 的层（q==k 的层继续用 G1 的无掩码 is_causal，掩码反而更慢）。
 # 注意 FA 的 atten_mask 语义是「True = 屏蔽」，与 SDPA 的「True = 保留」相反。
@@ -45,7 +55,9 @@ def clear_mask_cache() -> None:
 # 这里按 (param, 切片) 在一个 step 内复用同一份 bf16 权重 ⇒ 每个权重每步只 cast 一次。
 # 影子靠在原 Parameter 的计算图上（p[idx].to(bf16)），不新增叶子张量 ⇒ DDP 梯度同步、激活重算、
 # 梯度累加语义全部不变；step 结束时清缓存。数值上与 autocast 的 cast 逐位相同（同为 rne 舍入）。
-_WEIGHT_SHADOW = os.environ.get("ONETRANS_WEIGHT_SHADOW", "0").lower() not in ("", "0", "false", "no")
+# 显式 bf16 必须配影子权重：否则 fp32 权重与 bf16 激活相乘会被 type-promotion 提回 fp32
+_WEIGHT_SHADOW = (_EXPLICIT_BF16
+                  or os.environ.get("ONETRANS_WEIGHT_SHADOW", "0").lower() not in ("", "0", "false", "no"))
 _SHADOW_CACHE: dict = {}
 
 
@@ -110,7 +122,8 @@ class RMSNorm(nn.Module):
             #（max_rel 3.891e-03 vs 7.704e-03，b64/seq1203 单算子 0.063 ms vs 0.205 ms）
             import torch_npu  # noqa: PLC0415
 
-            return torch_npu.npu_rms_norm(x, self.weight.to(x.dtype), self.eps)[0]
+            _y = torch_npu.npu_rms_norm(x, self.weight.to(x.dtype), self.eps)[0]
+            return _y.to(torch.bfloat16) if _EXPLICIT_BF16 else _y
         input_dtype = x.dtype
         x_fp32 = x.float()
         rms = x_fp32.pow(2).mean(dim=-1, keepdim=True).add(self.eps).rsqrt()
@@ -246,7 +259,7 @@ class CausalMaskAttention(nn.Module):
             ns_in = x[:, seq_len:, :].permute(1, 0, 2)                          # (ns, B, d)
             w = _wget(self.kqv_w, ("nsT", proj_idx),
                       lambda: self.kqv_w[: self.ns_len, proj_idx].transpose(1, 2))
-            b = self.kqv_b[: self.ns_len, proj_idx].unsqueeze(1)
+            b = _nsbias(self.kqv_b[: self.ns_len, proj_idx].unsqueeze(1))
             out[:, seq_len:, :] = (torch.bmm(ns_in, w) + b).permute(1, 0, 2)
             return out
         if self.use_bmm:
@@ -259,7 +272,7 @@ class CausalMaskAttention(nn.Module):
                 # 两者布局一致才逐位相同（先 cast 后 transpose 会得到另一种 stride，bmm 分块不同 ⇒ 差 1 ULP）。
                 w = _wget(self.kqv_w, ("nsT", proj_idx),
                           lambda: self.kqv_w[: self.ns_len, proj_idx].transpose(1, 2))         # (ns, d, d)^T
-                b = self.kqv_b[: self.ns_len, proj_idx].unsqueeze(1)   # bias 保持 fp32：与 baseline 的 fp32 加法逐位一致
+                b = _nsbias(self.kqv_b[: self.ns_len, proj_idx].unsqueeze(1))   # bias 保持 fp32：与 baseline 的 fp32 加法逐位一致
                 parts.append((torch.bmm(ns_in, w) + b).permute(1, 0, 2))  # (B, ns, d)
             if len(parts) == 1:
                 return parts[0]
@@ -392,9 +405,9 @@ class OneTransBlock(nn.Module):
             ns_in = x[:, seq_len:, :].permute(1, 0, 2)
             h = torch.nn.functional.silu(
                 torch.bmm(ns_in, _wget(self.ffn_w1, ("nsT",), lambda: self.ffn_w1[: self.ns_len].transpose(1, 2)))
-                + self.ffn_b1[: self.ns_len].unsqueeze(1))
+                + _nsbias(self.ffn_b1[: self.ns_len].unsqueeze(1)))
             o = torch.bmm(h, _wget(self.ffn_w2, ("nsT",), lambda: self.ffn_w2[: self.ns_len].transpose(1, 2))) \
-                + self.ffn_b2[: self.ns_len].unsqueeze(1)
+                + _nsbias(self.ffn_b2[: self.ns_len].unsqueeze(1))
             out[:, seq_len:, :] = torch.nn.functional.silu(o).permute(1, 0, 2)
             return out
         res = []
@@ -408,10 +421,10 @@ class OneTransBlock(nn.Module):
                         ns_in,
                         _wget(self.ffn_w1, ("nsT",), lambda: self.ffn_w1[: self.ns_len].transpose(1, 2)),
                     )
-                    + self.ffn_b1[: self.ns_len].unsqueeze(1))   # bias 保持 fp32（同 kqv）
+                    + _nsbias(self.ffn_b1[: self.ns_len].unsqueeze(1)))   # bias 保持 fp32（同 kqv）
                 o = torch.bmm(
                     h, _wget(self.ffn_w2, ("nsT",), lambda: self.ffn_w2[: self.ns_len].transpose(1, 2))
-                ) + self.ffn_b2[: self.ns_len].unsqueeze(1)
+                ) + _nsbias(self.ffn_b2[: self.ns_len].unsqueeze(1))
                 res.append(torch.nn.functional.silu(o).permute(1, 0, 2))      # (B, ns, d)
             else:
                 for i in range(self.ns_len):
@@ -438,6 +451,8 @@ class OneTransBlock(nn.Module):
         return self._ffn_part(self._attn_part(x))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if _EXPLICIT_BF16 and x.dtype != torch.bfloat16:
+            x = x.to(torch.bfloat16)          # [O1] 残差流保持 bf16，避免 autocast 反复搬 dtype
         ck = self.use_checkpoint and self.training
         if not ck or _CKPT_SCOPE == "all":
             return checkpoint(self._forward_impl, x, use_reentrant=False) if ck else self._forward_impl(x)
