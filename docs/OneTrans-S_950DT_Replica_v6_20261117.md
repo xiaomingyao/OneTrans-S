@@ -143,6 +143,50 @@
 | 口径差异 | 参数量含稀疏表 vs 纯稠密；层数 6 vs 7 pass | ⚠️ 已标注 |
 | 本仓多出 | 8 个算子级开关（合计 −68.35%）、DDP、profiling 钩子 | 论文侧无对应 |
 
+### 3.4 embedding 与 dense 计算的组件依赖
+
+论文的 OneTrans-S **含 sparse embeddings**（双优化器里一半是给它的），本仓是纯稠密实现 ⇒ 两侧依赖的组件集合不同。
+本节分别列出，并给昇腾侧的可用性取证（`tools/probes/probe_embedding_components.py`，容器内实跑）。
+
+**A. Embedding 侧（论文有，本仓无）**
+
+| 组件 | 论文是否依赖 | 昇腾可用性 | 取证 / 报错 |
+|---|---|---|---|
+| 表存储与分片 | 是（Params 含 sparse embedding） | 无现成实现（torchrec EC / HKV 接缝存在但未验证规模） | — |
+| `nn.Embedding(sparse=True)` 前反向 | 是 | ✅ | grad `is_sparse=True`，nnz=256 |
+| `EmbeddingBag` | 部分后端用 | ✅ | grad dense，形状正确 |
+| **稀疏梯度 all_reduce**（data-parallel 必需） | 是 | ❌ **硬阻断** | `c10d::allreduce_ is not currently supported on the NPU backend` |
+| **稀疏优化器 Adagrad(β₁=0.1, β₂=1.0)** | 是 | ❌ **硬阻断** | `aten::mul.out is not currently supported on the NPU backend` |
+| `gather` / `index_copy_`（Auto-Split 拆特征） | 是 | ✅ | 形状正确 |
+| fp32 表 + bf16 主干（autocast） | 是 | ✅（输出保持 fp32，需显式 cast） | y.dtype=float32 |
+
+⇒ **论文的 embedding 侧在昇腾上「算子层能跑，通信与优化器层跑不通」**：稀疏梯度不能跨卡同步、稀疏 Adagrad 没有实现。
+要落地必须替换两项 —— ① 稀疏梯度改为 dense 化或行分片（自定义通信）；② 自写 sparse Adagrad/RMSProp，或走 RecSDK 的 torchrec 端口。
+
+**B. Dense 侧（两侧都有，本仓已落地）**
+
+| 组件 | 论文 | 本仓（昇腾算子） | 实测 |
+|---|---|---|---|
+| GEMM | cuBLAS | aclnn `MatMulV3` / `BatchMatMul` | 412–430 TF/s（95–99% 峰值） |
+| Attention | FlashAttention-2 | aclnn `FlashAttentionScoreV4` + `GradV4` | fwd 53.6% / bwd 45.5% |
+| RMSNorm | 未披露 | `RmsNorm` / `RmsNormGrad` | 1445 GB/s（未融合时） |
+| SiLU | 未披露 | `Swish` / `SiluBackward` | 3178 GB/s（贴峰值） |
+| Cast | autocast 自动插入 | `Cast`（显式 bf16 干路后大幅减少） | 3,083 kernel/步中占一类 |
+| dense 优化器 | **RMSProp(lr=0.005, α=0.99999, momentum=0)** | `torch.optim.AdamW(lr=5e-3, wd=0)` | ⚠️ 不同 |
+| 梯度同步 | NCCL all-reduce | HCCL AllReduce | 19.5 ms/步，暴露 4.7 |
+| **grad-norm clip** | global，dense 90 / sparse 120 | **未实现**（但 `clip_grad_norm_` 在 NPU 可用） | 实测 total_norm=4054.7 → 裁到 90 ✅ |
+| 激活重算 | activation recomputation | `torch.utils.checkpoint`（档 A） | 显存 −19.3 GB（58.48→39.17） |
+| 数据 | 工业特征 + 稀疏表 | 合成 token 常驻 device，无表 | 口径差异 |
+
+**C. 依赖缺口与补齐路线**
+
+| 优先级 | 缺口 | 补法 | 代价 |
+|---|---|---|---|
+| 1 | grad-norm clip | 一行 `clip_grad_norm_(dense_params, 90)`（NPU 已实测可用） | 无，不影响步时口径 |
+| 2 | dense 优化器换 RMSProp | `torch.optim.RMSprop(lr=5e-3, alpha=0.99999, momentum=0)` | 改收敛轨迹，需复跑 loss 曲线对比 |
+| 3 | 稀疏表 + 双优化器 | 需先解决稀疏通信与 sparse Adagrad（两项均硬阻断） | 大改；且本仓无表数据，属另一技术域 |
+| 4 | tokenizer 结构对齐 | 论文未披露内部投影方式 | 不可闭合 |
+
 ## 4 性能优化
 
 ### 4.1 与论文开箱性能对比
