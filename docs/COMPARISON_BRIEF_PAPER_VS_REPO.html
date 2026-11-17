@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>对账速查：论文 OneTrans-S 实现 vs 本仓实现</title>
+<style>
+body{font-family:"Microsoft YaHei","PingFang SC",-apple-system,Segoe UI,sans-serif;max-width:1180px;margin:0 auto;
+padding:32px 28px 60px;color:#1f2328;line-height:1.65;font-size:15px;background:#fff}
+h1{font-size:26px;color:#C00000;border-bottom:3px solid #C00000;padding-bottom:10px;margin:6px 0 18px}
+h2{font-size:20px;color:#C00000;border-left:5px solid #C00000;padding-left:10px;margin:34px 0 12px}
+h3{font-size:16.5px;color:#8B0000;margin:22px 0 8px}
+p{margin:9px 0}
+ul,ol{margin:8px 0 8px 22px;padding:0}li{margin:4px 0}
+.tw{overflow-x:auto;margin:12px 0 16px}
+table{border-collapse:collapse;width:100%;font-size:13.5px}
+th{background:#fbeaea;color:#8B0000;font-weight:600;text-align:left;padding:7px 9px;border:1px solid #e3c9c9}
+td{padding:6px 9px;border:1px solid #e3c9c9;vertical-align:top}
+tbody tr:nth-child(even){background:#fcf8f8}
+code{background:#f4f5f7;border-radius:3px;padding:1px 4px;font-family:Consolas,Menlo,monospace;font-size:12.8px;color:#a03030}
+pre{background:#f7f7f9;border:1px solid #e5e5ea;border-left:4px solid #C00000;border-radius:4px;padding:11px 13px;overflow-x:auto}
+pre code{background:none;color:#24292f;padding:0;font-size:12.6px;line-height:1.5}
+blockquote{margin:10px 0;padding:8px 14px;background:#fdf6f6;border-left:4px solid #d98b8b;color:#5b4b4b}
+hr{border:none;border-top:1px solid #eee;margin:22px 0}
+.meta{color:#666;font-size:13px}
+
+table.tree{width:100%;border-collapse:collapse;font-size:13px;margin:10px 0}
+table.tree th{background:#111827;color:#fff;font-weight:600;padding:7px 9px;text-align:left;white-space:nowrap}
+table.tree td{padding:6px 9px;border-bottom:1px solid #e5e7eb;vertical-align:top;line-height:1.55}
+table.tree tr.lv1{background:#eef2f7;font-weight:700}
+table.tree tr.lv2{background:#fff;font-weight:600}
+table.tree tr.lv3{background:#fcfdff}
+table.tree tr.tv{cursor:pointer}
+table.tree tr.tv:hover{background:#e8f2ff}
+table.tree tr.hid{display:none}
+table.tree .tf{display:inline-block;width:1.15em;color:#2563eb;font-size:10px;vertical-align:1px}
+table.tree .tf.off{visibility:hidden}
+</style></head><body>
+<h1>对账速查：论文 OneTrans-S 实现 vs 本仓实现</h1>
+<p>&gt; 速查版（4 张表）。完整版（14 模块实现对照 + 算子改写代价 + kernel 落点 + 精度取证）见 <code>IMPL_COMPARISON_PAPER_VS_REPO.md</code>； &gt; 参数逐张量拆分见 <code>PARAM_COMPARISON_ONETRANS_S.md</code>；十节总对账见 <code>AUDIT_VS_PAPER_ONETRANS_S.md</code>。 &gt; 边界：论文<strong>未开源代码</strong>，故&quot;论文实现&quot;按其文字规定逐项核对。</p>
+<h2>一、结构层</h2>
+<div class="tw"><table><thead><tr><th>项</th><th>论文 OneTrans-S</th><th>本仓</th><th>判定</th></tr></thead><tbody><tr><td>层数</td><td>&quot;6 stacked OneTrans blocks&quot;</td><td><strong>1 base + 6 pyramid = 7 次 block-pass</strong></td><td>⚠️ 表述歧义（论文 TFLOPs 也只有按 7 次才对得上 2.64 T）</td></tr><tr><td>d_model / heads</td><td>256 / 4</td><td>256 / 4</td><td>✅</td></tr><tr><td>FFN 宽度</td><td><strong>未给</strong></td><td>1536（= 6×d）</td><td>⚠️ 推定（由消融表 24 M 行交叉佐证）</td></tr><tr><td>序列长度</td><td>1190 → 12，每层取 32 的倍数，顶层 = NS 数</td><td><code>[1203,960,736,480,256,12]</code></td><td>✅</td></tr><tr><td>NS token / [SEP]</td><td>12 / 有</td><td>12 / 有（总长 1203）</td><td>✅</td></tr><tr><td>参数共享</td><td>S 共享一套 QKV+FFN，每个 NS 各一套</td><td><code>kqv_list[13]</code> / <code>ffn_list[13]</code>，S 用第 12 组</td><td>✅</td></tr><tr><td>掩码</td><td>金字塔尾部截断 ⇒ 底右因果</td><td><code>paper_causal</code>：<code>col ≤ row + (Lk−Lq)</code></td><td>✅</td></tr><tr><td>Pre-Norm / SiLU×2</td><td>是</td><td>是</td><td>✅</td></tr><tr><td>位置编码</td><td>图中有方框，<strong>未给形式</strong></td><td><strong>无可训练位置编码参数</strong></td><td>⚠️ 未闭合</td></tr><tr><td>参数量</td><td>91 M（<strong>含 sparse embedding</strong>）</td><td><strong>91,026,946</strong>（纯稠密，无稀疏表）</td><td>✅ 数值 / ⚠️ 构成不同</td></tr><tr><td>计算量</td><td>2.6481 TFLOPs（nominal 6ND）</td><td><strong>2.6489 TFLOPs</strong>（同口径，差 0.03%）</td><td>✅</td></tr></tbody></table></div>
+<h2>二、算子层</h2>
+<div class="tw"><table><thead><tr><th>项</th><th>论文</th><th>本仓</th><th>差异性质</th></tr></thead><tbody><tr><td>Attention</td><td><strong>FlashAttention-2</strong></td><td><code>npu_fusion_attention</code>（aclnn <strong>FA v4</strong>）+ 部分层内置 causal</td><td>等价物替换</td></tr><tr><td>Mask 实现</td><td>未规定</td><td>显式张量 + 缓存；注意 FA 的 <code>atten_mask</code> 是 <strong>True=屏蔽</strong>（与 SDPA 相反）</td><td>语义对齐</td></tr><tr><td>QKV 计算</td><td>未规定</td><td>逐 token <code>Linear</code>（默认）/ <code>NS_BMM=1</code> 时 13 组拼成 <strong>1 次 bmm</strong></td><td>本仓改写 −25.70%</td></tr><tr><td>FFN 计算</td><td>未规定</td><td>逐 token（默认）/ <code>FULL_PROJ=1</code> 全量投影 + 原地覆盖 NS 行</td><td>本仓改写 −11.13%</td></tr><tr><td>归一化</td><td>RMSNorm</td><td>手写链 / <code>FUSED_NORM=1</code> 走厂商 <code>npu_rms_norm</code>（反向复用 rstd）</td><td>本仓改写 −14.85%</td></tr><tr><td>序列拼接</td><td>[SEP] + concat</td><td><code>torch.cat</code> / <code>CAT_INPLACE=1</code> 预分配 + 原地写</td><td>本仓改写 −9.48%</td></tr><tr><td>精度</td><td>BF16/FP16 + 激活重算</td><td>autocast bf16（默认）/ <code>EXPLICIT_BF16=1</code> 显式 bf16 干路 + 档 A 重算</td><td>对应&quot;mixed precision&quot;档</td></tr><tr><td>反向</td><td>未规定</td><td>全 autograd，FA/FFN/QKV 走厂商 backward，无自写 kernel</td><td>等价</td></tr></tbody></table></div>
+<h2>三、训练层</h2>
+<div class="tw"><table><thead><tr><th>项</th><th>论文</th><th>本仓</th><th>判定</th></tr></thead><tbody><tr><td>优化器</td><td><strong>双优化器、无 weight decay</strong>：sparse Adagrad(0.1, 1.0) / dense <strong>RMSProp(lr=0.005)</strong></td><td><strong>AdamW(lr=5e-3, wd=0)</strong></td><td>⚠️ 实质不同</td></tr><tr><td>梯度裁剪</td><td>global grad-norm，<strong>dense 90 / sparse 120</strong></td><td><strong>未实现</strong></td><td>❌ 缺口</td></tr><tr><td>per-GPU batch</td><td>2048 + gradient accumulation</td><td>2048（档 A，开重算）</td><td>✅</td></tr><tr><td>分布式</td><td>data-parallel，16 GPU all-reduce</td><td>DDP over HCCL，16 die（2 节点 × 8）</td><td>✅ 同构</td></tr><tr><td>数据</td><td>工业全量特征</td><td>合成 token 常驻 device，步时不含取数与 H2D</td><td>⚠️ 口径选择</td></tr><tr><td>框架/算子库</td><td><strong>未披露</strong></td><td>CANN 9.1.0 + torch_npu 2.10 + FA v4</td><td>无可比</td></tr></tbody></table></div>
+<h2>四、差异清单（只有 4 条要记住）</h2>
+<div class="tw"><table><thead><tr><th>类型</th><th>内容</th><th>能否闭合</th></tr></thead><tbody><tr><td><strong>结构差异</strong></td><td>tokenizer 规模：论文的 Group-wise 变体省掉 13 M 参数 ⇒ 它的 tokenizer 比本仓（0.81 M）重得多</td><td>❌ 论文未披露内部投影方式</td></tr><tr><td><strong>训练差异</strong></td><td>优化器（AdamW vs RMSProp/Adagrad）、<strong>grad-norm clip 未实现</strong></td><td>✅ clip 一行代码可补；优化器可换</td></tr><tr><td><strong>口径差异</strong></td><td>参数量含稀疏表 vs 纯稠密；层数 6 vs 7 pass</td><td>⚠️ 已标注</td></tr><tr><td><strong>本仓多出</strong></td><td>8 个算子级开关（合计 <strong>−68.35%</strong>）、DDP、profiling 钩子</td><td>论文侧无对应</td></tr></tbody></table></div>
+<h2>一句话</h2>
+<p><strong>算法对齐、算子改写、训练配置缺两项</strong>：结构 11 项里 9 项对齐（另 2 项为推定/构成差异）；算子层 7 处替换全部有逐位或 1 ULP 取证；真正的缺口只有 <strong>grad-norm clip</strong> 与 <strong>双优化器</strong>。</p>
+<script>
+(function(){
+  var tables=[].slice.call(document.querySelectorAll('table.tree'));
+  tables.forEach(function(t){
+    var rows=[].slice.call(t.querySelectorAll('tbody tr'));
+    rows.forEach(function(r){ if(+r.dataset.lv>1) r.classList.add('hid'); });
+    function kids(i){ return rows.filter(function(x){ return x.dataset.p===String(i); }); }
+    function collapse(i){
+      kids(i).forEach(function(k){
+        k.classList.add('hid');
+        var tf=k.querySelector('.tf'); if(tf) tf.textContent='▶';
+        collapse(k.dataset.i);
+      });
+    }
+    t.addEventListener('click', function(e){
+      var tr=e.target.closest('tr.tv'); if(!tr) return;
+      var tf=tr.querySelector('.tf'); if(!tf || tf.classList.contains('off')) return;
+      var open=tf.textContent.trim()==='▼';
+      if(open){ collapse(tr.dataset.i); tf.textContent='▶'; }
+      else { kids(tr.dataset.i).forEach(function(k){ k.classList.remove('hid'); }); tf.textContent='▼'; }
+    });
+  });
+})();
+</script>
+</body></html>
