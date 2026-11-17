@@ -63,3 +63,32 @@ mod(indices_flat, offsets)        # 优化器已在反向内完成，无需 opti
 # B 臂最小可测（推荐，数字最稳）
 /opt/buildtools/torch_v2_pt2.7.1/bin/python3 tools/probes/bench_dynamicemb_min.py
 ```
+
+## 5 16 die 数据并行实测（同形状）
+
+探针 `tools/probes/bench_dynamicemb_16.py`：**2 节点 × 8 die = 16 die**（122 + 111），
+每 die 持有**完整表副本**（数据并行真实形态；NPU 不支持 sparse all_reduce，故无跨卡稀疏同步），
+形状与单 die 探针一致：12 表 × 1,000,000 行 × 64 维、每 die 每步 24,576 次查表。
+启动：`torchrun --nnodes=2 --nprocs_per_node=8 --master_addr=192.168.0.82`，`HCCL_SOCKET_IFNAME=enp39s0f3`。
+
+| 指标 | 1 die | 16 die | 比值 |
+|---|---:|---:|---|
+| 单步时延（中位） | 10.62 ms | **14.28 ms** | **1.34×**（同跑时每 die 变慢） |
+| 单步时延（最慢 rank） | — | 15.91 ms | 最慢/中位 = **1.114** |
+| 每 die 吞吐 | 2.32 Mlookup/s | 1.72 Mlookup/s | 0.74× |
+| **聚合吞吐** | 2.32 Mlookup/s | **27.53 Mlookup/s** | **11.90×** |
+| 扩展效率（对 16 die 线性） | — | **74.4%** | — |
+
+逐 rank 单步（ms，rank0–15）：
+`12.77 / 14.23 / 15.91 / 13.95 / 13.90 / 15.58 / 14.08 / 14.32 ‖ 14.51 / 14.25 / 13.94 / 14.11 / 15.57 / 15.59 / 14.33 / 14.32`
+
+结论：
+1. **16 die 同时跑，单 die 慢 34%**（10.62 → 14.28 ms），聚合仍拿到 **11.90×**（效率 74.4%）；
+2. 慢 rank 分布**同时出现在两个节点**（node0 的 rank2/5、node1 的 rank4/5），
+   ⇒ 抖动来自 **die 级差异**，不是跨节点网络或节点差异；
+3. 每 die 变慢但**没有通信项**（表是副本、无 all-reduce）⇒ 34% 的代价来自
+   HBM/PCIe/下发在 8 die 并发时的争用，属**同机多 die 竞争**，不随卡数继续恶化到不可用；
+4. 与 EC 对比的结论不变：EC 在 1 M 行/表（d=256）单步就要 187.6 ms，HKV 16 die 最慢 rank 也只有 15.91 ms。
+
+> HBM 峰值读数 0.0 GiB 是已知现象：HKV 表分配在 torch 分配器之外，`max_memory_allocated` 不覆盖。
+> 按构造，每 die 表数据 = 12 × 1,000,000 × 64 × 4 B = **2.86 GiB**，加优化器状态约 2× ⇒ 约 5.7 GiB/die。

@@ -64,6 +64,13 @@ mod(indices_flat, offsets)        # 优化器已在反向内完成，无需 opti
 /opt/buildtools/torch_v2_pt2.7.1/bin/python3 tools/probes/bench_ec_vs_dynamicemb.py
 # B 臂最小可测（推荐，数字最稳）
 /opt/buildtools/torch_v2_pt2.7.1/bin/python3 tools/probes/bench_dynamicemb_min.py</code></pre>
+<h2>5 16 die 数据并行实测（同形状）</h2>
+<p>探针 <code>tools/probes/bench_dynamicemb_16.py</code>：<strong>2 节点 × 8 die = 16 die</strong>（122 + 111）， 每 die 持有<strong>完整表副本</strong>（数据并行真实形态；NPU 不支持 sparse all_reduce，故无跨卡稀疏同步）， 形状与单 die 探针一致：12 表 × 1,000,000 行 × 64 维、每 die 每步 24,576 次查表。 启动：<code>torchrun --nnodes=2 --nprocs_per_node=8 --master_addr=192.168.0.82</code>，<code>HCCL_SOCKET_IFNAME=enp39s0f3</code>。</p>
+<div class="tw"><table><thead><tr><th>指标</th><th>1 die</th><th>16 die</th><th>比值</th></tr></thead><tbody><tr><td>单步时延（中位）</td><td>10.62 ms</td><td><strong>14.28 ms</strong></td><td><strong>1.34×</strong>（同跑时每 die 变慢）</td></tr><tr><td>单步时延（最慢 rank）</td><td>—</td><td>15.91 ms</td><td>最慢/中位 = <strong>1.114</strong></td></tr><tr><td>每 die 吞吐</td><td>2.32 Mlookup/s</td><td>1.72 Mlookup/s</td><td>0.74×</td></tr><tr><td><strong>聚合吞吐</strong></td><td>2.32 Mlookup/s</td><td><strong>27.53 Mlookup/s</strong></td><td><strong>11.90×</strong></td></tr><tr><td>扩展效率（对 16 die 线性）</td><td>—</td><td><strong>74.4%</strong></td><td>—</td></tr></tbody></table></div>
+<p>逐 rank 单步（ms，rank0–15）： <code>12.77 / 14.23 / 15.91 / 13.95 / 13.90 / 15.58 / 14.08 / 14.32 ‖ 14.51 / 14.25 / 13.94 / 14.11 / 15.57 / 15.59 / 14.33 / 14.32</code></p>
+<p>结论：</p>
+<ol><li><strong>16 die 同时跑，单 die 慢 34%</strong>（10.62 → 14.28 ms），聚合仍拿到 <strong>11.90×</strong>（效率 74.4%）；</li><li>慢 rank 分布<strong>同时出现在两个节点</strong>（node0 的 rank2/5、node1 的 rank4/5）， ⇒ 抖动来自 <strong>die 级差异</strong>，不是跨节点网络或节点差异；</li><li>每 die 变慢但<strong>没有通信项</strong>（表是副本、无 all-reduce）⇒ 34% 的代价来自 HBM/PCIe/下发在 8 die 并发时的争用，属<strong>同机多 die 竞争</strong>，不随卡数继续恶化到不可用；</li><li>与 EC 对比的结论不变：EC 在 1 M 行/表（d=256）单步就要 187.6 ms，HKV 16 die 最慢 rank 也只有 15.91 ms。</li></ol>
+<p>&gt; HBM 峰值读数 0.0 GiB 是已知现象：HKV 表分配在 torch 分配器之外，<code>max_memory_allocated</code> 不覆盖。 &gt; 按构造，每 die 表数据 = 12 × 1,000,000 × 64 × 4 B = <strong>2.86 GiB</strong>，加优化器状态约 2× ⇒ 约 5.7 GiB/die。</p>
 <script>
 (function(){
   var tables=[].slice.call(document.querySelectorAll('table.tree'));
