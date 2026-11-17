@@ -338,3 +338,11 @@ torch.OutOfMemoryError: NPU out of memory. Tried to allocate 2.34 GiB (NPU 0; 91
 #   SiluBwd 34.0/54 | TensorMove 25.2/192 | RmsNormGrad 24.3/28 | Silu 22.6/54 | ReduceSum 20.8/158
 #   RmsNorm 15.6/28 | Zero 13.8/580 | Transpose 12.4/276 | FA附属 8.4+6.4   (Cast 已跌出前15)
 # 结论: 图模式 launch 收益上限仅 0.8%; TorchAir 需先把投影/掩码改成 trace 友好写法
+
+## Triton 验证「自写 attention」（2026-11-17, 1 die, BH=1024, D=64, 底右因果）
+# 能力: tl.dot(128^3 bf16) OK max|Δ|=7.6e-6; 标量参数 OK; 循环+trans+online softmax 可跑
+# 前向对比: Lq480/Lk1203  triton 9.143 vs FA 2.973 ms = 3.08x(+207%)
+#           Lq1203/Lk1203 triton 17.308 vs FA 7.469 ms = 2.32x(+132%)
+# tile sweep(BH512): 128x64 → 3.12x/2.66x; 64x64 → 3.82x/2.91x; 64x128 → 3.08x/2.32x; 128x128 失败
+# 自纠: 首版 n_start 方向写反(跳过的是"允许的前段列") ⇒ 假的"快29~51%"; 修正后为慢 2.3~3.1x
+# 结论: 自写 attention 否决(前向已慢2.3-3.1x, 反向还要写3个kernel, 厂商bwd 65.8ms/步)
