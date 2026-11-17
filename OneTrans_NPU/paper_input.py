@@ -51,3 +51,29 @@ class Bucketizer:
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         """x: [B, F] 连续值 → [B, F] int64 桶 id"""
         return torch.bucketize(x, self.boundaries.to(x.device))
+
+
+class SeqIdTokenizer(nn.Module):
+    """论文形态的序列 tokenizer（§3.2.2）：
+    item ID 查表 → 与 side information 拼接 → 共享投影 MLP → d_model。
+    输入：ids [B, L]、side [B, L, side_dim]；输出 [B, L, d_model]。
+    """
+
+    expects_ids = True
+
+    def __init__(self, lookup_kind: str, item_rows: int, e_dim: int,
+                 side_dim: int, d_model: int, device=None):
+        super().__init__()
+        self.e_dim, self.side_dim, self.d_model = e_dim, side_dim, d_model
+        self.item_table = build_table_lookup(lookup_kind, cardinalities=[item_rows],
+                                             e_dim=e_dim, device=device,
+                                             num_rows_default=item_rows)
+        self.proj = nn.Linear(e_dim + side_dim, d_model)
+
+    def forward(self, ids: torch.Tensor, side: torch.Tensor) -> torch.Tensor:
+        b, l = ids.shape
+        # 表接口吃 [N, F]（F=1）；这里 N = B×L。传 3D 会让 offsets 与 values 长度不匹配 ⇒ 越界
+        emb = self.item_table(ids.reshape(-1, 1))        # [B*L, 1, e_dim]
+        emb = emb.reshape(b, l, self.e_dim)
+        cat = torch.cat([emb, side], dim=-1)                                  # [B, L, e+side]
+        return self.proj(cat)

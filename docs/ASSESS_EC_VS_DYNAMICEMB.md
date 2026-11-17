@@ -183,3 +183,64 @@ per-GPU micro-batch 1024×2、全局 batch 32,768），**唯一变量是 `--ns-b
 > 仍未对齐的部分：论文序列侧也用 **item ID 查表**（§3.2.2 "concatenating the item ID with its side information"），
 > 本仓序列侧仍是 `nn.Linear(64 → 256)` 的连续特征投影（查表量会是 NS 侧的 100 倍：2048×1190 ≈ 2.4 M 次/步/die）。
 > 这条未做，故上表只覆盖非序列侧的查表。
+
+## 9 完整训练一次（新后端全链路：paper 形态 + HKV + 序列 item 表，16 die）
+
+配置：`paper` 形态（12 域 × 1,000,000 桶 × e_dim 32）+ 序列侧 item 表（1,000,000 行 × 32）
++ HKV 引擎；档 B 七开关全开；**300 步**（warmup 5），`--flops-per-sample 40.91e9`。
+
+| 指标 | 数值 |
+|---|---:|
+| 稳态步时（n=300） | **692.1 ms**（mean 692.0） |
+| 全局吞吐 | **47,346.9 samples/s**（每卡 2,959.2） |
+| MFU | **28.02%** |
+| HBM（分配器口径） | 59.14 GB |
+| 稠密参数 | 91,428,374（表 12×1M×32 + 1×1M×32 = 416 M 个 f32 ≈ 1.66 GB，不入 `nn.Parameters`） |
+| 每 die 每步查表量 | 非序列 24,576 + 序列 2048×1190 ≈ **2.44 M** ⇒ 合计 **2.46 M 次** |
+
+与前面的臂串起来（同环境同配置，n≥20）：
+
+| 臂 | 查表量/步/die | 步时 | MFU | 相对无表 |
+|---|---:|---:|---:|---:|
+| A 无表（linear direct） | 0 | 635.7 ms | 30.51% | — |
+| C paper + HKV（仅 NS 侧） | 24,576 | 667.0 ms | 29.08% | +4.92% |
+| **E paper + HKV + 序列 item 表** | **2.46 M** | **692.1 ms** | **28.02%** | **+8.87%** |
+
+⇒ 序列侧 item 查表（查表量放大 **100×**）只再增加 **+25.1 ms（+3.76%）**，
+因为 HKV 只搬访问到的行：2.46 M × 32 × 4 B ≈ 315 MB/步，按 3.3 TB/s 仅 ~0.1 ms，开销落在下发/去重侧。
+
+## 10 收敛验证（证明「表真的在训练」，非只跑通）
+
+**关键前提**：完整训练的 300 步用的是**随机标签**，loss 恒在 **0.69314（= ln 2）**，这是期望值水平，
+**不构成收敛证据**（本仓合成数据无真实信号）。为此单独做两组验证：
+
+**10.1 HKV 表更新探针**（`tools/probes/probe_hkv_updates.py`，1 die）
+
+| 检查 | 结果 |
+|---|---|
+| 反向 5 次后同一批 id 的向量 | 变化，`|Δ|max = 1.6158`（lr=0.5，梯度方向固定） |
+| 未被访问的行（id=0） | **完全不变** |
+| 结论 | HKV 的 rowwise Adagrad **确实在反向内更新被访问的行**，且不扰动其它行 |
+
+**10.2 端到端可学性**（1 die，`--ns-shape paper` + HKV，1,024 桶，标签 = 桶号过半，每步换 id）
+
+| 步段 | loss 均值 |
+|---|---:|
+| 0–10 | 0.7446 |
+| 30–40 | 0.3157 |
+| 100–110 | **0.0002** |
+| 290–300 | **0.0000** |
+
+⇒ 表 + MLP + 7 个 block + head 的整条链路都能学；此前的 0.693 平台是**桶太多（4096 / 1M）× 样本太少**导致每桶几乎只被访问一次，不是实现缺陷。
+
+## 11 附带取证：dynamic_emb 底层确实是 HKV
+
+建表时若 `init_capacity` 小于 `bucket_capacity`，报错栈直接暴露了 C++ 实现路径：
+
+```
+RuntimeError: /workspace/RecSDK/training/torch_rec_v2/dynamic_emb/../../../cust_op/hkv/include/hkv_hashtable.h:1000:
+HierarchicalKV error. Then `num_of_buckets_per_alloc` must be equal or less than initial required buckets number
+```
+
+⇒ 昇腾侧 `libdynamic_emb_op_npu.so` 是 **HierarchicalKV（hkv_hashtable）的 NPU 移植**；
+坑：`init_capacity` 必须 ≥ `bucket_capacity`（默认 128），否则建表失败。

@@ -92,6 +92,24 @@ mod(indices_flat, offsets)        # 优化器已在反向内完成，无需 opti
 <p>四点结论：</p>
 <ol><li><strong>论文形态（分桶 → 查表 → concat → 单次 MLP → split）在昇腾上跑通</strong>，整步代价 <strong>+4.92%</strong>，MFU 30.51% → 29.08%；</li><li><strong>EC 与小表下的 HKV 差距只有 0.46%</strong> —— 但这是 <code>e_dim=32</code>、表仅 1.54 GB 的结果； EC 的成本 ∝ 表体量（§1 的 <code>k=6.32 ms/GiB/步</code>），把 <code>e_dim</code> 提到 256（表 12.3 GB）时按模型外推 <strong>+78 ms/步</strong>， 且「表 + dense 梯度 + 优化器状态」三项常驻会把 HBM 推到 ~95 GB（超单 die 91.75 GiB）⇒ 必须行分片；</li><li><strong>参数量口径必须分列</strong>：EC 臂 475.42 M 里 <strong>384 M 是表</strong>（进 <code>nn.Parameters</code>，故有 dense 梯度、HBM +7.14 GB）； HKV 臂的表（1.54 GB / 384 M 个数）不进 <code>nn.Parameters</code>，报 91.42 M 与之不可比；</li><li>paper 形态的稠密参数比 direct 多 393,226（MLP 384→3072 = 1.18 M 替换了 256→3072 = 0.79 M），属结构差异不是优化。</li></ol>
 <p>&gt; 仍未对齐的部分：论文序列侧也用 <strong>item ID 查表</strong>（§3.2.2 &quot;concatenating the item ID with its side information&quot;）， &gt; 本仓序列侧仍是 <code>nn.Linear(64 → 256)</code> 的连续特征投影（查表量会是 NS 侧的 100 倍：2048×1190 ≈ 2.4 M 次/步/die）。 &gt; 这条未做，故上表只覆盖非序列侧的查表。</p>
+<h2>9 完整训练一次（新后端全链路：paper 形态 + HKV + 序列 item 表，16 die）</h2>
+<p>配置：<code>paper</code> 形态（12 域 × 1,000,000 桶 × e_dim 32）+ 序列侧 item 表（1,000,000 行 × 32） + HKV 引擎；档 B 七开关全开；<strong>300 步</strong>（warmup 5），<code>--flops-per-sample 40.91e9</code>。</p>
+<div class="tw"><table><thead><tr><th>指标</th><th>数值</th></tr></thead><tbody><tr><td>稳态步时（n=300）</td><td><strong>692.1 ms</strong>（mean 692.0）</td></tr><tr><td>全局吞吐</td><td><strong>47,346.9 samples/s</strong>（每卡 2,959.2）</td></tr><tr><td>MFU</td><td><strong>28.02%</strong></td></tr><tr><td>HBM（分配器口径）</td><td>59.14 GB</td></tr><tr><td>稠密参数</td><td>91,428,374（表 12×1M×32 + 1×1M×32 = 416 M 个 f32 ≈ 1.66 GB，不入 <code>nn.Parameters</code>）</td></tr><tr><td>每 die 每步查表量</td><td>非序列 24,576 + 序列 2048×1190 ≈ <strong>2.44 M</strong> ⇒ 合计 <strong>2.46 M 次</strong></td></tr></tbody></table></div>
+<p>与前面的臂串起来（同环境同配置，n≥20）：</p>
+<div class="tw"><table><thead><tr><th>臂</th><th>查表量/步/die</th><th>步时</th><th>MFU</th><th>相对无表</th></tr></thead><tbody><tr><td>A 无表（linear direct）</td><td>0</td><td>635.7 ms</td><td>30.51%</td><td>—</td></tr><tr><td>C paper + HKV（仅 NS 侧）</td><td>24,576</td><td>667.0 ms</td><td>29.08%</td><td>+4.92%</td></tr><tr><td><strong>E paper + HKV + 序列 item 表</strong></td><td><strong>2.46 M</strong></td><td><strong>692.1 ms</strong></td><td><strong>28.02%</strong></td><td><strong>+8.87%</strong></td></tr></tbody></table></div>
+<p>⇒ 序列侧 item 查表（查表量放大 <strong>100×</strong>）只再增加 <strong>+25.1 ms（+3.76%）</strong>， 因为 HKV 只搬访问到的行：2.46 M × 32 × 4 B ≈ 315 MB/步，按 3.3 TB/s 仅 ~0.1 ms，开销落在下发/去重侧。</p>
+<h2>10 收敛验证（证明「表真的在训练」，非只跑通）</h2>
+<p><strong>关键前提</strong>：完整训练的 300 步用的是<strong>随机标签</strong>，loss 恒在 <strong>0.69314（= ln 2）</strong>，这是期望值水平， <strong>不构成收敛证据</strong>（本仓合成数据无真实信号）。为此单独做两组验证：</p>
+<p><strong>10.1 HKV 表更新探针</strong>（<code>tools/probes/probe_hkv_updates.py</code>，1 die）</p>
+<div class="tw"><table><thead><tr><th>检查</th><th>结果</th></tr></thead><tbody><tr><td>反向 5 次后同一批 id 的向量</td><td>变化，`</td><td>Δ</td><td>max = 1.6158`（lr=0.5，梯度方向固定）</td></tr><tr><td>未被访问的行（id=0）</td><td><strong>完全不变</strong></td></tr><tr><td>结论</td><td>HKV 的 rowwise Adagrad <strong>确实在反向内更新被访问的行</strong>，且不扰动其它行</td></tr></tbody></table></div>
+<p><strong>10.2 端到端可学性</strong>（1 die，<code>--ns-shape paper</code> + HKV，1,024 桶，标签 = 桶号过半，每步换 id）</p>
+<div class="tw"><table><thead><tr><th>步段</th><th>loss 均值</th></tr></thead><tbody><tr><td>0–10</td><td>0.7446</td></tr><tr><td>30–40</td><td>0.3157</td></tr><tr><td>100–110</td><td><strong>0.0002</strong></td></tr><tr><td>290–300</td><td><strong>0.0000</strong></td></tr></tbody></table></div>
+<p>⇒ 表 + MLP + 7 个 block + head 的整条链路都能学；此前的 0.693 平台是<strong>桶太多（4096 / 1M）× 样本太少</strong>导致每桶几乎只被访问一次，不是实现缺陷。</p>
+<h2>11 附带取证：dynamic_emb 底层确实是 HKV</h2>
+<p>建表时若 <code>init_capacity</code> 小于 <code>bucket_capacity</code>，报错栈直接暴露了 C++ 实现路径：</p>
+<pre><code>RuntimeError: /workspace/RecSDK/training/torch_rec_v2/dynamic_emb/../../../cust_op/hkv/include/hkv_hashtable.h:1000:
+HierarchicalKV error. Then `num_of_buckets_per_alloc` must be equal or less than initial required buckets number</code></pre>
+<p>⇒ 昇腾侧 <code>libdynamic_emb_op_npu.so</code> 是 <strong>HierarchicalKV（hkv_hashtable）的 NPU 移植</strong>； 坑：<code>init_capacity</code> 必须 ≥ <code>bucket_capacity</code>（默认 128），否则建表失败。</p>
 <script>
 (function(){
   var tables=[].slice.call(document.querySelectorAll('table.tree'));

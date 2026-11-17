@@ -26,6 +26,22 @@ if str(PROJECT_ROOT) not in sys.path:
 from main_pytorch import MultiOneTransBlock
 
 
+def _ns_device():
+    """表后端（ec / dynamic_emb）要落在本 rank 的 die 上，且必须带索引。
+
+    HKV 的 C++ 侧用 int(str(device)[-1]) 取片号，传 "npu"（无索引）会取到 'u' 而报 ValueError。
+    """
+    s = _os.environ.get("ONETRANS_NS_DEVICE", "")
+    if s:
+        d = torch.device(s)
+        if d.type == "npu" and d.index is None:
+            d = torch.device(f"npu:{torch.npu.current_device()}")
+        return d
+    if hasattr(torch, "npu") and torch.npu.is_available():
+        return torch.device(f"npu:{torch.npu.current_device()}")
+    return torch.device("cpu")
+
+
 def linear_pyramid_schedule(total_tokens: int, ns_len: int, num_layers: int, align_to: int = 32) -> list[int]:
     if num_layers <= 0:
         raise ValueError("num_layers must be positive")
@@ -78,19 +94,7 @@ class TAACOneTransClassifier(nn.Module):
             sys.path.insert(0, str(PROJECT_ROOT))
         from ns_backend import build_ns_tokenizer
         self.ns_backend = _os.environ.get("ONETRANS_NS_BACKEND", "linear")
-        _ns_dev = None
-        if self.ns_backend not in ("linear", "dense", ""):
-            _dev_s = _os.environ.get("ONETRANS_NS_DEVICE", "")
-            if _dev_s:
-                _d = torch.device(_dev_s)
-                # HKV 的 C++ 侧用 int(str(device)[-1]) 取片号，"npu" 会取到 'u' ⇒ 必须带索引
-                if _d.type == "npu" and _d.index is None:
-                    _d = torch.device(f"npu:{torch.npu.current_device()}")
-                _ns_dev = _d
-            elif hasattr(torch, "npu") and torch.npu.is_available():
-                _ns_dev = torch.device(f"npu:{torch.npu.current_device()}")
-            else:
-                _ns_dev = torch.device("cpu")
+        _ns_dev = _ns_device() if self.ns_backend not in ("linear", "dense", "") else None
         # ONETRANS_NS_SHAPE = direct（直接把连续特征投影）| paper（论文形态：分桶 id → 查表 → concat → 单次 MLP → split）
         self.ns_shape = _os.environ.get("ONETRANS_NS_SHAPE", "direct")
         _rows = int(_os.environ.get("ONETRANS_NS_ROWS", "0"))
@@ -109,7 +113,20 @@ class TAACOneTransClassifier(nn.Module):
             self.non_seq_tokenizer = build_ns_tokenizer(
                 self.ns_backend, non_seq_dim=non_seq_dim, ns_len=ns_len, d_model=d_model,
                 num_rows=_rows, device=_ns_dev)
-        self.seq_tokenizer = nn.Linear(seq_feature_dim, d_model)
+        # 序列侧：ONETRANS_SEQ_ID=1 时走论文形态（item ID 查表 + side info 拼接 → 共享 MLP）
+        self.seq_uses_ids = _os.environ.get("ONETRANS_SEQ_ID", "0") == "1"
+        if self.seq_uses_ids:
+            from paper_input import SeqIdTokenizer
+            _rows = int(_os.environ.get("ONETRANS_SEQ_ROWS", "0"))
+            _edim = int(_os.environ.get("ONETRANS_SEQ_EDIM", "32"))
+            if _rows <= 0:
+                raise ValueError("ONETRANS_SEQ_ID=1 需要 ONETRANS_SEQ_ROWS（item 表行数）")
+            _d = _ns_device()
+            self.seq_tokenizer = SeqIdTokenizer(
+                _os.environ.get("ONETRANS_NS_BACKEND", "linear"), _rows, _edim,
+                seq_feature_dim, d_model, device=_d)
+        else:
+            self.seq_tokenizer = nn.Linear(seq_feature_dim, d_model)
         if use_sep_token:
             self.sep_token = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
         self.base_block = MultiOneTransBlock(
@@ -150,17 +167,27 @@ class TAACOneTransClassifier(nn.Module):
             nn.Linear(d_model, num_classes),
         )
 
-    def forward(self, non_seq_x: torch.Tensor, seq_x: torch.Tensor) -> torch.Tensor:
+    def forward(self, non_seq_x: torch.Tensor, seq_x: torch.Tensor,
+                seq_ids: torch.Tensor | None = None) -> torch.Tensor:
         _mk = _os.environ.get("ONETRANS_PHASE_MARKERS", "0") == "1"
         batch_size = non_seq_x.size(0)
         with _RF("P_embed") if _mk else _null():
             _t = self.non_seq_tokenizer(non_seq_x)      # linear: [B,ns,d]；表后端: 同样 [B,ns,d]
             # 表后端输出恒为 fp32（表精度），显式 bf16 干路下需转成主干 dtype；
             # 该 cast 的反向会把梯度还原成 fp32，表侧不受影响。
-            _t = _t.to(self.seq_tokenizer.weight.dtype)
+            try:
+                _dt = next(self.seq_tokenizer.parameters()).dtype
+            except StopIteration:
+                _dt = torch.float32
+            _t = _t.to(_dt)
             ns_tokens = _t.view(batch_size, self.ns_len, -1)
         with _RF("P_embed") if _mk else _null():
-            seq_tokens = self.seq_tokenizer(seq_x)
+            if self.seq_uses_ids:
+                if seq_ids is None:
+                    raise ValueError("ONETRANS_SEQ_ID=1 需要传入 seq_ids")
+                seq_tokens = self.seq_tokenizer(seq_ids, seq_x)   # (item ids, side info)
+            else:
+                seq_tokens = self.seq_tokenizer(seq_x)
         if self.use_sep_token:
             sep_token = self.sep_token.expand(batch_size, -1, -1)
             x = torch.cat([seq_tokens, sep_token, ns_tokens], dim=1)

@@ -80,6 +80,13 @@ def parse_args() -> argparse.Namespace:
                    help="paper 形态的特征域个数 F（默认=ns-len）")
     p.add_argument("--ns-edim", type=int, default=32,
                    help="paper 形态每域 embedding 维度（concat 后 F×edim 进 MLP）")
+    p.add_argument("--seq-id-rows", type=int, default=0,
+                   help="序列侧 item 表行数；>0 时序列走论文形态（item ID 查表 + side info → 共享 MLP）")
+    p.add_argument("--seq-edim", type=int, default=32, help="序列侧 item embedding 维度")
+    p.add_argument("--fresh-ids", action="store_true",
+                   help="每个 step 重新采样 id（完整训练口径；关闭时所有步复用同一批，只测性能）")
+    p.add_argument("--task", choices=("random", "parity", "threshold"), default="random",
+                   help="标签生成：random=随机(无可学信号，只测性能)；parity=id 奇偶(可学，用于完整训练收敛验证)")
     p.add_argument("--num-classes", type=int, default=2)
     # 训练
     p.add_argument("--device", default="npu" if hasattr(torch, "npu") else "cpu")
@@ -129,6 +136,15 @@ def build_model(args) -> nn.Module:
     )
 
 
+def _make_labels(task: str, non_seq: torch.Tensor, rows: int) -> torch.Tensor:
+    """合成可学标签：parity=单桶奇偶；threshold=桶号过半（单调、易学，用于验证收敛）"""
+    if task == "parity":
+        return (non_seq[:, 0] % 2).to(torch.long)
+    if task == "threshold":
+        return (non_seq[:, 0] >= rows // 2).to(torch.long)
+    raise ValueError(task)
+
+
 def main() -> None:
     args = parse_args()
     os.environ["ONETRANS_NS_BACKEND"] = args.ns_backend
@@ -145,6 +161,10 @@ def main() -> None:
     if args.ns_features:
         os.environ["ONETRANS_NS_FEATURES"] = str(args.ns_features)
     os.environ["ONETRANS_NS_EDIM"] = str(args.ns_edim)
+    os.environ["ONETRANS_SEQ_ID"] = "1" if args.seq_id_rows > 0 else "0"
+    if args.seq_id_rows > 0:
+        os.environ["ONETRANS_SEQ_ROWS"] = str(args.seq_id_rows)
+        os.environ["ONETRANS_SEQ_EDIM"] = str(args.seq_edim)
     is_main = rank == 0
     log = print if is_main else (lambda *a, **k: None)
 
@@ -199,6 +219,14 @@ def main() -> None:
                                 generator=gen).to(args.device)
     seq = torch.randn(n_local, args.seq_len, args.seq_feat_dim, generator=gen).to(args.device, dtype=in_dtype)
     labels = torch.randint(0, args.num_classes, (n_local,), generator=gen).to(args.device)
+    seq_ids = None
+    if args.seq_id_rows > 0:
+        seq_ids = torch.randint(0, args.seq_id_rows, (n_local, args.seq_len),
+                                generator=gen).to(args.device)
+    if args.task == "parity":
+        if non_seq.dtype not in (torch.int64, torch.int32):
+            raise SystemExit("--task parity 需要 id 形态输入（--ns-shape paper 或 --ns-backend ec/dynamic_emb）")
+        labels = _make_labels(args.task, non_seq, args.ns_rows)
 
     # [D2a] 梯度桶直视图：省掉 DDP 把 bucket 再拷回 param.grad 的那一步（profile 里 InplaceAdd/copy 的一部分）
     _bucket_view = os.environ.get("ONETRANS_DDP_BUCKET_VIEW", "0") == "1"
@@ -230,6 +258,14 @@ def main() -> None:
         log(f"[prof] rank0 profile_dir={args.profile_dir} active_steps={args.profile_steps}")
 
     for i in range(args.warmup + args.steps):
+        if args.fresh_ids:
+            # 完整训练口径：每步换一批 id（在 device 上采样，避免 H2D 干扰）
+            non_seq = torch.randint(0, args.ns_rows, non_seq.shape, device=args.device, dtype=torch.int64)
+            if seq_ids is not None:
+                seq_ids = torch.randint(0, args.seq_id_rows, seq_ids.shape,
+                                        device=args.device, dtype=torch.int64)
+            if args.task == "parity":
+                labels = _make_labels(args.task, non_seq, args.ns_rows)
         if device_type == "npu":
             torch.npu.synchronize()
         t0 = time.perf_counter()
@@ -239,7 +275,8 @@ def main() -> None:
             _nogr = torch.no_grad() if args.no_backward else contextlib.nullcontext()
             with _nogr, npu_compat.autocast_context(device_type=device_type, amp_dtype=amp_dtype, use_amp=use_amp):
                 with record_function("P_fwd") if phase_mark else contextlib.nullcontext():
-                    logits = model(non_seq[lo:hi], seq[lo:hi])
+                    logits = model(non_seq[lo:hi], seq[lo:hi],
+                                   seq_ids[lo:hi] if seq_ids is not None else None)
                     if explicit_bf16:
                         logits = logits.float()      # 只有这一步回到 fp32，一共 1 次/step
                 with record_function("P_loss") if phase_mark else contextlib.nullcontext():
