@@ -50,6 +50,89 @@ def split_cells(line: str) -> list:
     return [c.strip().replace("\\|", "|") for c in re.split(r"(?<!\\)\|", s)]
 
 
+def render_tree(rows: list) -> str:
+    """把 (depth, cells) 列表渲染成单表 + 可折叠行（默认只显示第 1 级）。"""
+    if not rows:
+        return ""
+    header = None
+    body = []
+    for d, cells in rows:
+        if d == 0 or (cells and cells[0].startswith("#")):
+            header = [c.lstrip("# ").strip() for c in cells]
+        else:
+            body.append((d, cells))
+    ncol = max(len(c) for _, c in body) if body else 1
+    if header is None:
+        header = ["层级 / 节点"] + ["" for _ in range(ncol - 1)]
+    header = (header + [""] * ncol)[:ncol]
+
+    parents: dict = {}
+    last_at: dict = {}
+    parent_set = set()
+    for idx, (d, cells) in enumerate(body):
+        parent_set.add(last_at.get(d - 1, -1))
+        last_at[d] = idx
+    last_at = {}          # 第二遍重新计算父子关系
+    out = ['<table class="tree"><thead><tr>'
+           + "".join(f"<th>{inline(c)}</th>" for c in header) + "</tr></thead><tbody>"]
+    for idx, (d, cells) in enumerate(body):
+        p = last_at.get(d - 1, -1)
+        parents[idx] = p
+        last_at[d] = idx
+        cells = (cells + [""] * ncol)[:ncol]
+        label, rest = cells[0], cells[1:]
+        arrow = ('<span class="tf">&#9654;</span>' if idx in parent_set
+                 else '<span class="tf off">&#9654;</span>')
+        out.append(
+            f'<tr class="tv lv{d}" data-i="{idx}" data-p="{p}" data-lv="{d}">'
+            f'<td><span class="tl" style="padding-left:{(d - 1) * 18}px">{arrow}{inline(label)}</span></td>'
+            + "".join(f"<td>{inline(c)}</td>" for c in rest)
+            + "</tr>"
+        )
+    out.append("</tbody></table>")
+    return "\n".join(out)
+
+
+TREE_CSS = """
+table.tree{width:100%;border-collapse:collapse;font-size:13px;margin:10px 0}
+table.tree th{background:#111827;color:#fff;font-weight:600;padding:7px 9px;text-align:left;white-space:nowrap}
+table.tree td{padding:6px 9px;border-bottom:1px solid #e5e7eb;vertical-align:top;line-height:1.55}
+table.tree tr.lv1{background:#eef2f7;font-weight:700}
+table.tree tr.lv2{background:#fff;font-weight:600}
+table.tree tr.lv3{background:#fcfdff}
+table.tree tr.tv{cursor:pointer}
+table.tree tr.tv:hover{background:#e8f2ff}
+table.tree tr.hid{display:none}
+table.tree .tf{display:inline-block;width:1.15em;color:#2563eb;font-size:10px;vertical-align:1px}
+table.tree .tf.off{visibility:hidden}
+"""
+
+TREE_JS = """
+(function(){
+  var tables=[].slice.call(document.querySelectorAll('table.tree'));
+  tables.forEach(function(t){
+    var rows=[].slice.call(t.querySelectorAll('tbody tr'));
+    rows.forEach(function(r){ if(+r.dataset.lv>1) r.classList.add('hid'); });
+    function kids(i){ return rows.filter(function(x){ return x.dataset.p===String(i); }); }
+    function collapse(i){
+      kids(i).forEach(function(k){
+        k.classList.add('hid');
+        var tf=k.querySelector('.tf'); if(tf) tf.textContent='\u25b6';
+        collapse(k.dataset.i);
+      });
+    }
+    t.addEventListener('click', function(e){
+      var tr=e.target.closest('tr.tv'); if(!tr) return;
+      var tf=tr.querySelector('.tf'); if(!tf || tf.classList.contains('off')) return;
+      var open=tf.textContent.trim()==='\u25bc';
+      if(open){ collapse(tr.dataset.i); tf.textContent='\u25b6'; }
+      else { kids(tr.dataset.i).forEach(function(k){ k.classList.remove('hid'); }); tf.textContent='\u25bc'; }
+    });
+  });
+})();
+"""
+
+
 def convert(md: str) -> str:
     out: list[str] = []
     lines = md.split("\n")
@@ -66,6 +149,18 @@ def convert(md: str) -> str:
                 + "</figure>"
             )
             i += 1
+            continue
+        if ln.strip().startswith("```tree"):
+            i += 1
+            rows = []
+            while i < len(lines) and not lines[i].strip().startswith("```"):
+                s = lines[i]
+                if s.strip():
+                    depth = (len(s) - len(s.lstrip(" "))) // 2 + 1
+                    rows.append((depth, [c.strip() for c in s.strip().split("|")]))
+                i += 1
+            i += 1
+            out.append(render_tree(rows))
             continue
         if ln.startswith("```"):
             i += 1
@@ -156,8 +251,9 @@ def main() -> None:
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{html.escape(a.title)}</title>
-<style>{CSS}</style></head><body>
+<style>{CSS}{TREE_CSS}</style></head><body>
 {body}
+<script>{TREE_JS}</script>
 </body></html>"""
     open(a.html, "w", encoding="utf-8").write(doc)
     print(f"wrote {a.html} ({len(doc)} bytes)")

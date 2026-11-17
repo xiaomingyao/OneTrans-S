@@ -21,6 +21,18 @@ pre code{background:none;color:#24292f;padding:0;font-size:12.6px;line-height:1.
 blockquote{margin:10px 0;padding:8px 14px;background:#fdf6f6;border-left:4px solid #d98b8b;color:#5b4b4b}
 hr{border:none;border-top:1px solid #eee;margin:22px 0}
 .meta{color:#666;font-size:13px}
+
+table.tree{width:100%;border-collapse:collapse;font-size:13px;margin:10px 0}
+table.tree th{background:#111827;color:#fff;font-weight:600;padding:7px 9px;text-align:left;white-space:nowrap}
+table.tree td{padding:6px 9px;border-bottom:1px solid #e5e7eb;vertical-align:top;line-height:1.55}
+table.tree tr.lv1{background:#eef2f7;font-weight:700}
+table.tree tr.lv2{background:#fff;font-weight:600}
+table.tree tr.lv3{background:#fcfdff}
+table.tree tr.tv{cursor:pointer}
+table.tree tr.tv:hover{background:#e8f2ff}
+table.tree tr.hid{display:none}
+table.tree .tf{display:inline-block;width:1.15em;color:#2563eb;font-size:10px;vertical-align:1px}
+table.tree .tf.off{visibility:hidden}
 </style></head><body>
 <h1>OneTrans-S 昇腾 950DT 复刻报告（v6 第三稿）</h1>
 <p>&gt; 数据基准：16 die（2 节点 × 8）· CANN 9.1.0 · torch 2.10.0 / torch_npu 2.10.0 · 2026-11-17 &gt; 代码：<code>github.com/xiaomingyao/OneTrans-S</code>（上游 GPU 参考锁定 <code>8febd7e</code>）</p>
@@ -75,20 +87,51 @@ hr{border:none;border-top:1px solid #eee;margin:22px 0}
 <h3>4.1 与论文开箱性能对比</h3>
 <div class="tw"><table><thead><tr><th>口径</th><th>论文（16 卡）</th><th>本仓（16 die）</th><th>比值</th></tr></thead><tbody><tr><td><strong>开箱（无任何优化）</strong></td><td><strong>407 ms</strong>（fp32、朴素注意力、全长序列）</td><td><strong>1,942.1 ms</strong>（MFU 7.70%、显存 52.30 GB）</td><td><strong>4.77×</strong></td></tr><tr><td>全局吞吐</td><td>—</td><td>16,872.3 sps</td><td>—</td></tr></tbody></table></div>
 <p>&gt; 两者卡数同为 16、全局 batch 同为 32,768，故比值可直接读作&quot;开箱差距 4.77 倍&quot;。 &gt; 差距集中在三处：逐 token 小算子过多（Cat 51.4 ms/步）、attention 走 SDPA 回退、norm 无融合。</p>
-<h3>4.2 Profiling TOP-DOWN（分级嵌套）</h3>
+<h3>4.2 Profiling TOP-DOWN（分级嵌套，点 ▶ 展开）</h3>
 <p><strong>分析过程</strong>：① 读 <code>step_trace_time.csv</code> 的 Computing / Communication / Free 三列，先判定是否计算受限； ② 用<strong>差分法</strong>（全步 − <code>--no-backward</code>）拆前向与反向，避免把 CPU 入队窗口当成设备执行时间； ③ <code>kernel_details.csv</code> 按算子名家族聚合；④ 按 (name, shape) 聚合 TOP 单算子；⑤ 隔离探针复测单算子，区分&quot;形状问题&quot;与&quot;调用问题&quot;。</p>
-<p><strong>L1 · 整步 614.27 ms</strong></p>
-<ul><li>计算 <strong>605.5 ms（98.6%）</strong>；通信 19.5 ms（暴露 4.7 ms）；空闲 4.1 ms；气泡 0</li><li><strong>瓶颈判定</strong>：纯计算受限。调度 + 通信 + 气泡合计 1.5% ⇒ 优化只能落在计算本身，加卡或改通信无效</li></ul>
-<p><strong>L2 · 阶段拆分</strong></p>
-<ul><li><strong>前向 164.2 ms（占整步 26.7%）</strong>，HBM 12.33 GB</li><li>L3 前向内部：GEMM 58.9（35.9%）→ FA 47.5（28.9%）→ SiLU 22.5（13.7%）→ RMSNorm 15.6（9.5%）→ Add 12.4（7.6%）→ 搬运 5.5（3.3%）→ 其他 1.8</li><li>瓶颈：前向已接近理想 —— GEMM + FA 占 64.8%，FA 前向效率 44.8% 属 bf16 FA v4 常态区间</li><li><strong>反向 + 优化器 + 通信 471.9 ms（占整步 76.8%）</strong>，反向/前向 = <strong>2.87×</strong>（理论上限约 2.0×）</li><li>L3 反向内部：FA 反向 139.7（29.6%）→ GEMM 117.2（24.8%）→ Add 45.3（9.6%）→ 搬运 40.8（8.6%）→ SiLU 34.0（7.2%）→ RMSNorm 24.5（5.2%）→ ReduceSum 20.8（4.4%）→ AllReduce 19.5（4.1%）→ Zero 14.0（3.0%）→ 其他 16.1</li><li>瓶颈：多出的 0.87× 来自三处 —— FA 反向按 2.5× 前向计且效率仅 35.0%、bias 梯度（200 次 ReduceSum）、激活重算（档 A）</li></ul>
-<p><strong>L3 · 家族汇总（全步口径）</strong></p>
-<div class="tw"><table><thead><tr><th>家族</th><th>耗时</th><th>占整步</th><th>效率</th><th>性质</th></tr></thead><tbody><tr><td>cube 合计</td><td><strong>348.4 ms</strong></td><td>56.7%</td><td>126.6 TF/s（<strong>29.3%</strong>）</td><td>一半算力空转</td></tr><tr><td>GEMM（Mm + Addmm）</td><td>176.1 ms</td><td>28.7%</td><td>277 TF/s（64.3%）</td><td>隔离可达 376–427</td></tr><tr><td>FA 反向 + 附属</td><td>139.7 ms</td><td>22.7%</td><td>151 TF/s（35.0%）</td><td>受内核限制</td></tr><tr><td>FA 前向 + 附属</td><td>47.4 ms</td><td>7.7%</td><td>193.8 TF/s（44.8%）</td><td>常态区间</td></tr><tr><td>vector 合计</td><td><strong>235.4 ms</strong></td><td>38.3%</td><td>3178–3358 GB/s</td><td><strong>已贴 HBM 峰值</strong></td></tr><tr><td>AllReduce</td><td>19.5 ms</td><td>3.2%</td><td>—</td><td>暴露仅 4.7 ms</td></tr></tbody></table></div>
-<p><strong>L4 · 单算子 TOP</strong></p>
-<div class="tw"><table><thead><tr><th>算子</th><th>耗时</th><th>次数</th><th>单次</th><th>性质</th></tr></thead><tbody><tr><td>FlashAttentionScoreGradV4</td><td>131.3 ms</td><td>14</td><td>9.4 ms</td><td>cube，35.0%</td></tr><tr><td>Mm_MatMulV3</td><td>108.6 ms</td><td>152</td><td>714 µs</td><td>cube，64.3%</td></tr><tr><td>Add_AddAiCore</td><td>56.9 ms</td><td>479</td><td>119 µs</td><td>vector，贴带宽</td></tr><tr><td>Addmm_MatMulV3</td><td>53.6 ms</td><td>78</td><td>688 µs</td><td>cube，带 bias</td></tr><tr><td>FlashAttentionScoreV4</td><td>41.0 ms</td><td>14</td><td>2.9 ms</td><td>cube，44.8%</td></tr><tr><td>SiluBackward</td><td>33.9 ms</td><td>54</td><td>628 µs</td><td>vector，贴带宽</td></tr><tr><td>InplaceCopy_TensorMove</td><td>26.0 ms</td><td>236</td><td>110 µs</td><td>纯搬运，插在 GEMM 之间</td></tr><tr><td>RmsNormGrad</td><td>24.5 ms</td><td>28</td><td>874 µs</td><td>1445 GB/s（峰值 45%）</td></tr><tr><td>Silu_Swish</td><td>22.6 ms</td><td>54</td><td>418 µs</td><td>vector，贴带宽</td></tr><tr><td>ReduceSum</td><td>21.1 ms</td><td>200</td><td>105 µs</td><td>= <code>F.linear</code> 的 bias 梯度</td></tr><tr><td>RmsNorm</td><td>15.6 ms</td><td>28</td><td>556 µs</td><td>混合</td></tr><tr><td>InplaceZero_ZerosLike</td><td>14.0 ms</td><td><strong>580</strong></td><td>24 µs</td><td>下发受限（碎片）</td></tr><tr><td>InplaceCopy_Transpose</td><td>11.6 ms</td><td>241</td><td>48 µs</td><td>重排</td></tr></tbody></table></div>
-<p><strong>L4 · 三个瓶颈结论</strong></p>
-<ol><li><strong>cube 一半算力在空转</strong>：模型内 GEMM 只有 277 TF/s，隔离同形状实测 <strong>376–427 TF/s</strong>（峰值 87–99%）⇒ 不是形状问题，是串行/交织问题。</li><li><strong>小算子碎片</strong>：580 次 Zero（24 µs/次）+ 200 次 ReduceSum + 236 次搬运 + 241 次转置，每次都在等下发，累计 60–70 ms。</li><li><strong>vector 侧无油水</strong>：235.4 ms ≈ 800 GB/步 ÷ 3.2 TB/s ⇒ 带宽硬下限，只能靠融合减少字节。</li></ol>
-<p><strong>可回收时间排序（排优先级用）</strong></p>
-<div class="tw"><table><thead><tr><th>排序</th><th>方向</th><th>可回收</th><th>依据</th></tr></thead><tbody><tr><td>1</td><td>GEMM 效率 64.3% → 87%</td><td>≈ 54 ms</td><td>176.1 × (1 − 64.3/87)</td></tr><tr><td>2</td><td>小算子碎片（Zero / ReduceSum / 搬运 / 转置）</td><td>≈ 30 ms</td><td>需 AscendC 融合或增广写法</td></tr><tr><td>3</td><td>FA 反向 35% → 45%</td><td>≈ 29 ms</td><td>受 FA v4 内核限制</td></tr><tr><td>4</td><td>vector 融合减字节（add+norm / silu 合并）</td><td>≈ 30–40 ms</td><td>上限 = 235 × 15%</td></tr><tr><td>5</td><td>cube∥vector 重叠 15% → 30%</td><td>≈ 50 ms</td><td>需换执行形态（图模式 / 融合算子）</td></tr></tbody></table></div>
+<table class="tree"><thead><tr><th>节点（点 ▶ 展开）</th><th>耗时</th><th>占全步</th><th>判据与瓶颈</th></tr></thead><tbody>
+<tr class="tv lv1" data-i="0" data-p="-1" data-lv="1"><td><span class="tl" style="padding-left:0px"><span class="tf">&#9654;</span>L1 · 整步</span></td><td>614.27 ms</td><td>100%</td><td>计算 605.5（98.6%）｜通信 19.5（暴露 4.7）｜空闲 4.1｜气泡 0 ⇒ 纯计算受限，调度+通信+气泡合计仅 1.5%</td></tr>
+<tr class="tv lv2" data-i="1" data-p="0" data-lv="2"><td><span class="tl" style="padding-left:18px"><span class="tf">&#9654;</span>L2 · 前向</span></td><td>164.2 ms</td><td>26.7%</td><td>HBM 12.33 GB；GEMM + FA 占前向 64.8%，结构已接近理想</td></tr>
+<tr class="tv lv3" data-i="2" data-p="1" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · GEMM（前向投影）</span></td><td>58.9 ms</td><td>9.6%</td><td>Mm / Addmm，含 13 组 NS 投影与两个 tokenizer</td></tr>
+<tr class="tv lv3" data-i="3" data-p="1" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · FA 前向 + 附属</span></td><td>47.5 ms</td><td>7.7%</td><td>193.8 TF/s = 44.8% 峰值，bf16 FA v4 常态区间</td></tr>
+<tr class="tv lv3" data-i="4" data-p="1" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · SiLU</span></td><td>22.5 ms</td><td>3.7%</td><td>3178 GB/s，贴 HBM 峰值</td></tr>
+<tr class="tv lv3" data-i="5" data-p="1" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · RMSNorm</span></td><td>15.6 ms</td><td>2.5%</td><td>1445 GB/s（峰值 45%），未融合</td></tr>
+<tr class="tv lv3" data-i="6" data-p="1" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · Add</span></td><td>12.4 ms</td><td>2.0%</td><td>3222 GB/s，贴峰值</td></tr>
+<tr class="tv lv3" data-i="7" data-p="1" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · 搬运 / 重排</span></td><td>5.5 ms</td><td>0.9%</td><td>视图拷贝</td></tr>
+<tr class="tv lv3" data-i="8" data-p="1" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · 其他 + Cast</span></td><td>1.8 ms</td><td>0.3%</td><td>—</td></tr>
+<tr class="tv lv2" data-i="9" data-p="0" data-lv="2"><td><span class="tl" style="padding-left:18px"><span class="tf">&#9654;</span>L2 · 反向 + 优化器 + 通信</span></td><td>471.9 ms</td><td>76.8%</td><td>反向/前向 = 2.87×（理论约 2.0×）；多出的 0.87× 来自 FA 反向按 2.5× 计费、bias 梯度、激活重算</td></tr>
+<tr class="tv lv3" data-i="10" data-p="9" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · FA 反向 + 附属</span></td><td>139.7 ms</td><td>22.7%</td><td>151 TF/s = 35.0% 峰值，最大单块</td></tr>
+<tr class="tv lv3" data-i="11" data-p="9" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · GEMM</span></td><td>117.2 ms</td><td>19.1%</td><td>含 weight-grad（(256,1.23M)@(1.23M,1024)）</td></tr>
+<tr class="tv lv3" data-i="12" data-p="9" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · Add</span></td><td>45.3 ms</td><td>7.4%</td><td>梯度累加，贴带宽</td></tr>
+<tr class="tv lv3" data-i="13" data-p="9" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · 搬运 / 重排</span></td><td>40.8 ms</td><td>6.6%</td><td>拷贝插在 GEMM 之间，打断流水</td></tr>
+<tr class="tv lv3" data-i="14" data-p="9" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · SiLU 反向</span></td><td>34.0 ms</td><td>5.5%</td><td>贴带宽</td></tr>
+<tr class="tv lv3" data-i="15" data-p="9" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · RMSNorm 反向</span></td><td>24.5 ms</td><td>4.0%</td><td>874 µs/次，已到厂商最优</td></tr>
+<tr class="tv lv3" data-i="16" data-p="9" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · ReduceSum</span></td><td>20.8 ms</td><td>3.4%</td><td>200 次，= F.linear 的 bias 梯度 dy.sum(0)</td></tr>
+<tr class="tv lv3" data-i="17" data-p="9" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · AllReduce</span></td><td>19.5 ms</td><td>3.2%</td><td>暴露仅 4.7 ms（0.8%）</td></tr>
+<tr class="tv lv3" data-i="18" data-p="9" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · Zero</span></td><td>14.0 ms</td><td>2.3%</td><td>580 次 × 24 µs，下发受限</td></tr>
+<tr class="tv lv3" data-i="19" data-p="9" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · 其他 + Cast</span></td><td>16.1 ms</td><td>2.6%</td><td>—</td></tr>
+<tr class="tv lv2" data-i="20" data-p="0" data-lv="2"><td><span class="tl" style="padding-left:18px"><span class="tf">&#9654;</span>L2 · 全步 TOP 单算子（跨阶段口径）</span></td><td>13 个算子累计 520.6 ms</td><td>84.7%</td><td>单算子粒度，用于定位发起点</td></tr>
+<tr class="tv lv3" data-i="21" data-p="20" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · FlashAttentionScoreGradV4</span></td><td>131.3 ms</td><td>21.4%</td><td>14 次 × 9.4 ms</td></tr>
+<tr class="tv lv3" data-i="22" data-p="20" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · Mm_MatMulV3</span></td><td>108.6 ms</td><td>17.7%</td><td>152 次 × 714 µs</td></tr>
+<tr class="tv lv3" data-i="23" data-p="20" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · Add_AddAiCore</span></td><td>56.9 ms</td><td>9.3%</td><td>479 次 × 119 µs</td></tr>
+<tr class="tv lv3" data-i="24" data-p="20" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · Addmm_MatMulV3</span></td><td>53.6 ms</td><td>8.7%</td><td>78 次 × 688 µs</td></tr>
+<tr class="tv lv3" data-i="25" data-p="20" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · FlashAttentionScoreV4</span></td><td>41.0 ms</td><td>6.7%</td><td>14 次 × 2.9 ms</td></tr>
+<tr class="tv lv3" data-i="26" data-p="20" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · SiluBackward</span></td><td>33.9 ms</td><td>5.5%</td><td>54 次 × 628 µs</td></tr>
+<tr class="tv lv3" data-i="27" data-p="20" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · InplaceCopy_TensorMove</span></td><td>26.0 ms</td><td>4.2%</td><td>236 次 × 110 µs</td></tr>
+<tr class="tv lv3" data-i="28" data-p="20" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · RmsNormGrad</span></td><td>24.5 ms</td><td>4.0%</td><td>28 次 × 874 µs</td></tr>
+<tr class="tv lv3" data-i="29" data-p="20" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · Silu_Swish</span></td><td>22.6 ms</td><td>3.7%</td><td>54 次 × 418 µs</td></tr>
+<tr class="tv lv3" data-i="30" data-p="20" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · ReduceSum</span></td><td>21.1 ms</td><td>3.4%</td><td>200 次 × 105 µs</td></tr>
+<tr class="tv lv3" data-i="31" data-p="20" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · RmsNorm</span></td><td>15.6 ms</td><td>2.5%</td><td>28 次 × 556 µs</td></tr>
+<tr class="tv lv3" data-i="32" data-p="20" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · InplaceZero_ZerosLike</span></td><td>14.0 ms</td><td>2.3%</td><td>580 次 × 24 µs</td></tr>
+<tr class="tv lv3" data-i="33" data-p="20" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · InplaceCopy_Transpose</span></td><td>11.6 ms</td><td>1.9%</td><td>241 次 × 48 µs</td></tr>
+<tr class="tv lv2" data-i="34" data-p="0" data-lv="2"><td><span class="tl" style="padding-left:18px"><span class="tf">&#9654;</span>L2 · 瓶颈归因（可回收时间排序）</span></td><td>≈ 190–200 ms</td><td>—</td><td>五项合计，是后续优化空间的全部来源</td></tr>
+<tr class="tv lv3" data-i="35" data-p="34" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · cube 空转</span></td><td>≈ 54 ms</td><td>—</td><td>模型内 277 TF/s vs 隔离 376–427 TF/s（峰值 87–99%）⇒ 串行/交织问题，不是形状问题</td></tr>
+<tr class="tv lv3" data-i="36" data-p="34" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · cube∥vector 重叠</span></td><td>≈ 50 ms</td><td>—</td><td>实测重叠仅 15%（串行 2.192 → 并发 2.102 ms），需改执行形态</td></tr>
+<tr class="tv lv3" data-i="37" data-p="34" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · vector 融合减字节</span></td><td>≈ 30–40 ms</td><td>—</td><td>235.4 ms × 15% 字节（add+norm、silu 合并）</td></tr>
+<tr class="tv lv3" data-i="38" data-p="34" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · 小算子碎片</span></td><td>≈ 30 ms</td><td>—</td><td>580 Zero + 200 ReduceSum + 236 搬运 + 241 转置，每次都在等下发</td></tr>
+<tr class="tv lv3" data-i="39" data-p="34" data-lv="3"><td><span class="tl" style="padding-left:36px"><span class="tf off">&#9654;</span>L3 · FA 反向效率</span></td><td>≈ 29 ms</td><td>—</td><td>35% → 45%，受 FA v4 内核限制，需厂商支持</td></tr>
+</tbody></table>
+<p>&gt; 读表说明：三条 L2 支路口径不同 —— 前向/反向是<strong>阶段口径</strong>（差分法），TOP 单算子是<strong>跨阶段口径</strong>（同一算子在前向与反向都会出现，故不重复计入阶段）；最后一条是归因汇总（各项独立，不可相加后与步时相除）。所有耗时为 3 个稳态步的设备侧 kernel 时间求和（636.1 ms），故 L3 之和会略大于 614.27 ms 的步时。</p>
 <h3>4.3 优化执行与收益表（按分类展示）</h3>
 <p><strong>分类 ⑤ 布局与内存组织（论文未涉及，本仓独有）</strong></p>
 <div class="tw"><table><thead><tr><th>优化项</th><th>开关</th><th>单步 Δ</th><th>累计步时</th></tr></thead><tbody><tr><td>起点</td><td>—</td><td>—</td><td>1,942.1 ms</td></tr><tr><td>NS 专有 QKV/FFN 由逐 token Linear 合成 bmm</td><td><code>NS_BMM</code></td><td><strong>−25.70%</strong></td><td>1,442.9 ms</td></tr><tr><td>融合 <code>npu_rms_norm</code> 替代手写 norm 链</td><td><code>FUSED_NORM</code></td><td>−14.85%</td><td>1,228.6 ms</td></tr><tr><td>去 cat：预分配 + 原地写</td><td><code>CAT_INPLACE</code></td><td>−9.48%</td><td>1,112.1 ms</td></tr><tr><td>全量投影 + 原地覆盖 NS 行</td><td><code>FULL_PROJ</code></td><td>−11.13%</td><td>823.5 → 753.0 ms</td></tr><tr><td>全量投影与 FA BSH 同开</td><td>—</td><td>−3.05%</td><td>753.0 → 730.0 ms</td></tr></tbody></table></div>
@@ -123,4 +166,28 @@ hr{border:none;border-top:1px solid #eee;margin:22px 0}
 <p><strong>关系</strong>：nominal 把全部 91 M 参数乘到每个位置，实际只用到 13 组参数中的 1 组 ⇒ <strong>nominal = actual × 64.7</strong>。 ⇒ nominal 只能用于与论文同口径对齐，<strong>不能当 MFU 分子</strong>（否则得出&quot;占峰值 1%&quot;的假数）。</p>
 <h2>附 B 证据索引</h2>
 <div class="tw"><table><thead><tr><th>结论</th><th>文件 / 提交</th></tr></thead><tbody><tr><td>论文数字与口径（唯一真源）</td><td><code>docs/TOPIC_ONETRANS_S.md</code> §1、§4.1</td></tr><tr><td>与上游逐位等价</td><td><code>tools/probes/compare_upstream_model.py</code>、<code>docs/MODEL_ALIGNMENT_AUDIT.md</code></td></tr><tr><td>五阶段迁移细节</td><td><code>docs/MIGRATION.md</code></td></tr><tr><td>TOP-DOWN 分解与 ReduceSum 归因</td><td><code>docs/PROFILE_ROUND2_AFTER_OPT.md</code> §10–§11</td></tr><tr><td>优化收益逐项 A/B</td><td><code>docs/OPT_ROUND1_RESULTS.md</code>、<code>README.md</code> §3.0</td></tr><tr><td>Cube / Vector 隔离实测</td><td><code>tools/probes/probe_vec_compute.py</code>、<code>tools/probes/probe_vec_bandwidth.py</code></td></tr><tr><td>论文 4 项优化的昇腾适用性</td><td><code>docs/ASSESS_PAPER_4_OPTS_ON_ASCEND.md</code></td></tr><tr><td>全部原始日志</td><td><code>results/</code>（A/B、profile、fp8/int8 探针）</td></tr></tbody></table></div>
+<script>
+(function(){
+  var tables=[].slice.call(document.querySelectorAll('table.tree'));
+  tables.forEach(function(t){
+    var rows=[].slice.call(t.querySelectorAll('tbody tr'));
+    rows.forEach(function(r){ if(+r.dataset.lv>1) r.classList.add('hid'); });
+    function kids(i){ return rows.filter(function(x){ return x.dataset.p===String(i); }); }
+    function collapse(i){
+      kids(i).forEach(function(k){
+        k.classList.add('hid');
+        var tf=k.querySelector('.tf'); if(tf) tf.textContent='▶';
+        collapse(k.dataset.i);
+      });
+    }
+    t.addEventListener('click', function(e){
+      var tr=e.target.closest('tr.tv'); if(!tr) return;
+      var tf=tr.querySelector('.tf'); if(!tf || tf.classList.contains('off')) return;
+      var open=tf.textContent.trim()==='▼';
+      if(open){ collapse(tr.dataset.i); tf.textContent='▶'; }
+      else { kids(tr.dataset.i).forEach(function(k){ k.classList.remove('hid'); }); tf.textContent='▼'; }
+    });
+  });
+})();
+</script>
 </body></html>
