@@ -40,6 +40,16 @@ def inline(t: str) -> str:
     return t
 
 
+def split_cells(line: str) -> list:
+    """按未转义的 | 切分表格行；支持单元格内用 \\| 转义的竖线。"""
+    s = line.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|") and not s.endswith("\\|"):
+        s = s[:-1]
+    return [c.strip().replace("\\|", "|") for c in re.split(r"(?<!\\)\|", s)]
+
+
 def convert(md: str) -> str:
     out: list[str] = []
     lines = md.split("\n")
@@ -73,11 +83,11 @@ def convert(md: str) -> str:
             i += 1
             continue
         if ln.strip().startswith("|") and i + 1 < len(lines) and re.match(r"^\|[\s:|-]+\|$", lines[i + 1].strip()):
-            header = [c.strip() for c in ln.strip().strip("|").split("|")]
+            header = split_cells(ln)
             i += 2
             rows = []
             while i < len(lines) and lines[i].strip().startswith("|"):
-                rows.append([c.strip() for c in lines[i].strip().strip("|").split("|")])
+                rows.append(split_cells(lines[i]))
                 i += 1
             t = ["<table><thead><tr>"] + [f"<th>{inline(c)}</th>" for c in header] + ["</tr></thead><tbody>"]
             for r in rows:

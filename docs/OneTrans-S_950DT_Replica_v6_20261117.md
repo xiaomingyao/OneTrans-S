@@ -1,4 +1,4 @@
-# OneTrans-S 昇腾 950DT 复刻报告（v6 第二稿）
+# OneTrans-S 昇腾 950DT 复刻报告（v6 第三稿）
 
 > 数据基准：16 die（2 节点 × 8）· CANN 9.1.0 · torch 2.10.0 / torch_npu 2.10.0 · 2026-11-17
 > 代码：`github.com/xiaomingyao/OneTrans-S`（上游 GPU 参考锁定 `8febd7e`）
@@ -18,15 +18,39 @@
 
 ## 2 OneTrans-S 模型架构
 
-### 2.1 模型架构（论文 Figure 2）
+### 2.1 模型架构
 
-![论文 Figure 2：OneTrans 系统架构 —— (a) 框架、(b) 单块、(c) 混合参数化](figs/fig2_system_architecture.png)
+论文 Figure 2 把架构画成三层，自外向内如下。
 
-| 子图 | 内容 | 解读 |
+**① 框架层（OneTrans Framework）**
+
+```
+序列特征（S）   ──→ Sequential Tokenizer  ┐
+                                           ├──→ [SEP] + concat ──→ 统一序列 ──→ Pyramid Stack ──→ Task Tower
+非序列特征（NS）──→ Non-Seq Tokenizer     ┘
+```
+
+序列特征按时间戳融合成一条 token 序列；非序列特征按 Auto-Split 拆成若干个 token；两组 token 用 [SEP] 拼接成**一条**序列，之后只走一个 Transformer 主干。
+
+**② 块层（OneTrans Block，Pre-Norm）**
+
+```
+x ──→ RMSNorm ──→ Mix Causal Attention ──→ ⊕ ──→ RMSNorm ──→ Mix FFN ──→ ⊕ ──→ x'
+```
+
+与标准块的结构差异为零；差异在于子层是"混合"的 —— 同一个注意力/FFN 算子内部，S token 与 NS token 走**不同权重**。
+
+**③ 参数层（Mix Parameterization）**
+
+| 位置 | S token（序列侧） | 每个 NS token |
 |---|---|---|
-| **(a) OneTrans Framework** | 序列特征（S，蓝）与非序列特征（NS，橙）分别 tokenize → 插入 [SEP] → 拼成统一序列 → 堆叠 **OneTrans Pyramid Stack** → 尾部位置进 Task Tower | 关键在"堆叠 + 收缩"：每层只把**尾部若干位置**上送，前面的位置被截断，位置数逐层递减 |
-| **(b) OneTrans Block** | NS/S tokens + 位置编码 → RMSNorm → **Mix Causal Attention** → 残差 → RMSNorm → **Mix FFN** → 残差 | 标准 Pre-Norm Transformer 块，但两个子层都是"混合"的：S 与 NS 走不同权重 |
-| **(c) Mix Parameterization** | Attention 侧：S 组一段 QKV、每个 NS token 各一段 QKV；FFN 侧：S 组一个 FFN、每个 NS token 各自一个 FFN | **S token 共享一套 QKV/FFN；每个 NS token 拥有自己的 token-specific QKV/FFN** ⇒ 参数量随 NS 数线性增加 |
+| Attention 的 QKV | 共享 **1 套** | 各有 **1 套**（token-specific） |
+| FFN | 共享 **1 套** | 各有 **1 套**（token-specific） |
+| 合计组数 | — | **ns_len + 1 = 13 组** |
+
+**设计意图**：把特征交叉与序列建模合并进一个主干（不再用 DCN/DIN + Transformer 的双塔）；金字塔堆叠负责逐层压缩序列长度；NS token 参数独立，保留各特征域的专属映射能力。
+
+**对本仓实现的影响**：13 组 QKV/FFN 意味着大量"逐 token 的小矩阵乘"，这是后续最大单项收益（`NS_BMM`，单步 −25.70%）的来源。
 
 ### 2.2 数据流
 
@@ -46,7 +70,7 @@
 
 | 环节 | 尺寸 | 说明 |
 |---|---|---|
-| 统一序列 | 1190 + 12 + 1 = **1203** | 1 个 [SEP] 分隔用户行为序列与 NS token |
+| 统一序列 | 1190 + 12 + 1 = **1203** | 1 个 [SEP] 分隔行为序列与 NS token |
 | 逐层 query 长度 | 1203 → 1203 → 960 → 736 → 480 → 256 → **12** | 32 对齐的线性收缩，顶层 = NS 数 |
 | K/V 长度 | 等于上一层的输出长度 | 掩码为**底右对齐因果**（`col ≤ row + (Lk − Lq)`） |
 
@@ -93,16 +117,16 @@
 基线：上游 `WestbrookLong/OneTrans_Pytorch`（单卡、无分布式、无任何 NPU 代码）。
 **优化开关全关时与上游逐位等价**：949 个张量 key+shape 全等、前向输出 md5 相同、参数量 91,026,946 一致。
 
-| 阶段 | 改动 | 具体内容 | 判据 |
+| 阶段 | 改动量 | 关键内容 | 判据 |
 |---|---|---|---|
-| **一 环境与设备** | 新增 `npu_compat.py`（160 行）+ 装配层（138 行） | `device` 增加 `npu`；固定环境指纹四项（SoC / CANN / torch_npu / driver）；`torchrun + DDP over HCCL` 替代单卡脚本（`broadcast_buffers=False`、`find_unused_parameters=True`） | `device_type=npu`、SoC 名正确、16 rank 全部起来 |
-| **二 稀疏特征与 Embedding** | **0 行** | 无稀疏表：91 M 参数全稠密、81 个张量、最大 5 MB；`grep -c "nn.Embedding\|EmbeddingBag\|torchrec"` = 0 | 参数与上游逐位一致 |
-| **三 注意力算子** | `main_pytorch.py` 9 行（env 开关） | `SDPA` → `torch_npu.npu_fusion_attention`（aclnn FA v4）：`atten_mask` **True=屏蔽**（与 SDPA 相反）、`BSH` 布局、底右因果 | kernel 45→6、46.3→12.3 µs；logits 逐位相同 |
-| **四 混合精度** | 0 行（走兼容层） | 冒烟用 autocast bf16 跑通；显式 bf16 干路属优化阶段（§4.3） | loss 有限、梯度无 NaN/Inf |
-| **五 精度固化** | 新增 6 个测试脚本 | CPU golden 对拍三关：张量 1.49e-7、loss Δ 5.96e-8、梯度 `max\|Δg\|` 4.88e-4（1 bf16 ULP） | 三关全 PASS |
+| 一 环境与设备 | `npu_compat.py` 160 行 + 装配层 138 行 | device 增加 npu 分支；固定环境指纹四项（SoC / CANN / torch_npu / driver）；torchrun + DDP over HCCL 替代单卡脚本 | device_type=npu、SoC 名正确、16 rank 全部起来 |
+| 二 稀疏特征与 Embedding | **0 行** | 本模型无稀疏表：91 M 参数全稠密、81 个张量、最大 5 MB；`nn.Embedding` / `EmbeddingBag` / `torchrec` 三项命中数均为 0 | 参数与上游逐位一致 |
+| 三 注意力算子 | `main_pytorch.py` 9 行（env 开关） | SDPA 换成 `npu_fusion_attention`（aclnn FA v4）；注意 `atten_mask` 语义是 **True=屏蔽**（与 SDPA 相反）；切 BSH 布局；底右因果 | kernel 45→6、46.3→12.3 µs；logits 逐位相同 |
+| 四 混合精度 | 0 行（走兼容层） | 冒烟用 autocast bf16 跑通；显式 bf16 干路属优化阶段（§4.3） | loss 有限、梯度无 NaN/Inf |
+| 五 精度固化 | 新增 6 个测试脚本 | CPU golden 对拍三关：张量级 1.49e-7、loss 差 5.96e-8、梯度最大绝对误差 4.88e-4（1 个 bf16 ULP） | 三关全 PASS |
 
 改动集中在装配层，占上游参考实现 1,233 行的 **5.4%（基础）/ 11.9%（含多卡）**；
-`models/taac_onetrans.py`、损失、指标、数据管道 **全部 0 行改动**。
+模型文件、损失、指标、数据管道 **全部 0 行改动**。
 
 ### 3.3 与论文对齐评估
 
@@ -130,46 +154,113 @@
 > 两者卡数同为 16、全局 batch 同为 32,768，故比值可直接读作"开箱差距 4.77 倍"。
 > 差距集中在三处：逐 token 小算子过多（Cat 51.4 ms/步）、attention 走 SDPA 回退、norm 无融合。
 
-### 4.2 Profiling TOP-DOWN（按数据流逐级）
+### 4.2 Profiling TOP-DOWN（分级嵌套）
 
 **分析过程**：① 读 `step_trace_time.csv` 的 Computing / Communication / Free 三列，先判定是否计算受限；
 ② 用**差分法**（全步 − `--no-backward`）拆前向与反向，避免把 CPU 入队窗口当成设备执行时间；
 ③ `kernel_details.csv` 按算子名家族聚合；④ 按 (name, shape) 聚合 TOP 单算子；⑤ 隔离探针复测单算子，区分"形状问题"与"调用问题"。
 
-| 级 | 数据流节点 | 耗时 | 占全步 | 判据 / 观察 |
-|---|---|---:|---:|---|
-| 1 | **整个训练步** | **614.27 ms** | 100% | Computing 605.5（**98.6%**）、通信 19.5（暴露 4.7）、Free 4.1、气泡 0 ⇒ **纯计算受限** |
-| 2 | 前向 | 164.2 ms | 26.7% | 差分法测得；HBM 12.33 GB |
-| 2 | 反向 + 优化器 + 通信 | 471.9 ms | 76.8% | 反向/前向 = **2.87×** ⇒ 主战场 |
-| 3 | GEMM（Mm / Addmm） | 176.1 ms | 28.7% | 前 58.9 / 反 117.2；277 TF/s（64.3% 峰值） |
-| 3 | FA 反向 + 附属 | 139.7 ms | 22.7% | 151 TF/s（35.0% 峰值） |
-| 3 | FA 前向 + 附属 | 47.4 ms | 7.7% | 193.8 TF/s（44.8% 峰值） |
-| 3 | 向量类：Add 57.7 / SiLU 56.5 / 搬运 46.3 / RMSNorm 40.1 / ReduceSum 20.8 / Zero 14.0 | **235.4 ms** | 38.3% | 带宽 3178–3358 GB/s ⇒ **已贴 HBM 峰值** |
-| 3 | AllReduce | 19.5 ms | 3.2% | 暴露仅 4.7 ms（0.8%） |
-| 4 | TOP 单算子 | FA grad 131.3（14 次）· Mm 108.6（152 次）· Add 56.9（479 次）· Addmm 53.6（78 次）· FA fwd 41.0（14 次）· SiluBwd 33.9（54 次）· InplaceCopy 26.0（236 次）· RmsNormGrad 24.5（28 次）· ReduceSum 21.1（200 次）· Zero 14.0（**580 次**） | — | 小算子密度极高：580 次 Zero（24 µs/次）、200 次 ReduceSum（105 µs/次，= `F.linear` 的 bias 梯度）、236 次拷贝插在 GEMM 之间 |
+**L1 · 整步 614.27 ms**
 
-**两条关键判断**：
-1. **cube 一半算力在空转**：模型内 GEMM 只有 277 TF/s，而隔离同形状实测 376–427 TF/s（峰值的 87–99%）⇒ 不是形状问题，是**串行/交织**问题（三个嫌疑：小 M 层占比、`Addmm` 走不同 kernel、拷贝插在 GEMM 之间）。
-2. **vector 侧无油水**：235 ms 对应约 800 GB/步的必需访存 ÷ 3.2 TB/s ⇒ 是带宽决定的硬下限，只能靠**减少字节**（融合），不能靠"写得更快"。
+- 计算 **605.5 ms（98.6%）**；通信 19.5 ms（暴露 4.7 ms）；空闲 4.1 ms；气泡 0
+- **瓶颈判定**：纯计算受限。调度 + 通信 + 气泡合计 1.5% ⇒ 优化只能落在计算本身，加卡或改通信无效
 
-### 4.3 优化执行与收益表（按论文的优化分类）
+**L2 · 阶段拆分**
 
-| 分类 | 本仓优化项 | 开关 | 单步 Δ | 累计步时 |
-|---|---|---|---:|---:|
-| — | 起点 | — | — | 1,942.1 ms |
-| **⑤ 布局与内存组织**（论文未涉及） | NS 专有 QKV/FFN 由逐 token Linear 合成 `bmm` | `NS_BMM` | **−25.70%** | 1,442.9 ms |
-| ⑤ | 融合 `npu_rms_norm` 替代手写 norm 链 | `FUSED_NORM` | −14.85% | 1,228.6 ms |
-| ⑤ | 去 `cat`：预分配 + 原地写 | `CAT_INPLACE` | −9.48% | 1,112.1 ms |
-| **① 金字塔压缩** | 结构内建（无开关；开/关实测 1.68×，与论文表 3.06× 口径未闭合） | — | — | — |
-| **② Cross-request KV 缓存** | **不适用**：训练任务无 request / 历史维度 | — | — | — |
-| **③ FlashAttention-2** | SDPA 内置 causal 替代显式 mask | `SDPA_CAUSAL` | −5.06% | 847.3 ms |
-| ③ | FA `BSH` 布局（省转置） | `FA_BSH` | −2.81%（单算子 −31.7%） | 823.5 ms |
-| **⑤** | 全量投影 + 原地覆盖 NS 行 | `FULL_PROJ` | −11.13% | 753.0 ms |
-| ⑤ | 与 FA `BSH` 同开 | — | −3.05% | 730.0 ms |
-| **④ 混合精度 + 重算** | 显式 bf16 干路（关 autocast） | `EXPLICIT_BF16` | **−15.79%** | **614.7 ms（−68.35%）** |
+- **前向 164.2 ms（占整步 26.7%）**，HBM 12.33 GB
+  - L3 前向内部：GEMM 58.9（35.9%）→ FA 47.5（28.9%）→ SiLU 22.5（13.7%）→ RMSNorm 15.6（9.5%）→ Add 12.4（7.6%）→ 搬运 5.5（3.3%）→ 其他 1.8
+  - 瓶颈：前向已接近理想 —— GEMM + FA 占 64.8%，FA 前向效率 44.8% 属 bf16 FA v4 常态区间
+- **反向 + 优化器 + 通信 471.9 ms（占整步 76.8%）**，反向/前向 = **2.87×**（理论上限约 2.0×）
+  - L3 反向内部：FA 反向 139.7（29.6%）→ GEMM 117.2（24.8%）→ Add 45.3（9.6%）→ 搬运 40.8（8.6%）→ SiLU 34.0（7.2%）→ RMSNorm 24.5（5.2%）→ ReduceSum 20.8（4.4%）→ AllReduce 19.5（4.1%）→ Zero 14.0（3.0%）→ 其他 16.1
+  - 瓶颈：多出的 0.87× 来自三处 —— FA 反向按 2.5× 前向计且效率仅 35.0%、bias 梯度（200 次 ReduceSum）、激活重算（档 A）
 
-> 档 A（论文口径：每卡 2048 + 激活重算）同配置为 **752.0 ms / MFU 25.8% / 显存 39.17 GB**；
-> 档 B（每卡 1024×2、无重算）= **614.7 ms / MFU 31.6% / 58.48 GB**。二者只差 micro-batch 与重算，不可混读。
+**L3 · 家族汇总（全步口径）**
+
+| 家族 | 耗时 | 占整步 | 效率 | 性质 |
+|---|---:|---:|---:|---|
+| cube 合计 | **348.4 ms** | 56.7% | 126.6 TF/s（**29.3%**） | 一半算力空转 |
+| GEMM（Mm + Addmm） | 176.1 ms | 28.7% | 277 TF/s（64.3%） | 隔离可达 376–427 |
+| FA 反向 + 附属 | 139.7 ms | 22.7% | 151 TF/s（35.0%） | 受内核限制 |
+| FA 前向 + 附属 | 47.4 ms | 7.7% | 193.8 TF/s（44.8%） | 常态区间 |
+| vector 合计 | **235.4 ms** | 38.3% | 3178–3358 GB/s | **已贴 HBM 峰值** |
+| AllReduce | 19.5 ms | 3.2% | — | 暴露仅 4.7 ms |
+
+**L4 · 单算子 TOP**
+
+| 算子 | 耗时 | 次数 | 单次 | 性质 |
+|---|---:|---:|---:|---|
+| FlashAttentionScoreGradV4 | 131.3 ms | 14 | 9.4 ms | cube，35.0% |
+| Mm_MatMulV3 | 108.6 ms | 152 | 714 µs | cube，64.3% |
+| Add_AddAiCore | 56.9 ms | 479 | 119 µs | vector，贴带宽 |
+| Addmm_MatMulV3 | 53.6 ms | 78 | 688 µs | cube，带 bias |
+| FlashAttentionScoreV4 | 41.0 ms | 14 | 2.9 ms | cube，44.8% |
+| SiluBackward | 33.9 ms | 54 | 628 µs | vector，贴带宽 |
+| InplaceCopy_TensorMove | 26.0 ms | 236 | 110 µs | 纯搬运，插在 GEMM 之间 |
+| RmsNormGrad | 24.5 ms | 28 | 874 µs | 1445 GB/s（峰值 45%） |
+| Silu_Swish | 22.6 ms | 54 | 418 µs | vector，贴带宽 |
+| ReduceSum | 21.1 ms | 200 | 105 µs | = `F.linear` 的 bias 梯度 |
+| RmsNorm | 15.6 ms | 28 | 556 µs | 混合 |
+| InplaceZero_ZerosLike | 14.0 ms | **580** | 24 µs | 下发受限（碎片） |
+| InplaceCopy_Transpose | 11.6 ms | 241 | 48 µs | 重排 |
+
+**L4 · 三个瓶颈结论**
+
+1. **cube 一半算力在空转**：模型内 GEMM 只有 277 TF/s，隔离同形状实测 **376–427 TF/s**（峰值 87–99%）⇒ 不是形状问题，是串行/交织问题。
+2. **小算子碎片**：580 次 Zero（24 µs/次）+ 200 次 ReduceSum + 236 次搬运 + 241 次转置，每次都在等下发，累计 60–70 ms。
+3. **vector 侧无油水**：235.4 ms ≈ 800 GB/步 ÷ 3.2 TB/s ⇒ 带宽硬下限，只能靠融合减少字节。
+
+**可回收时间排序（排优先级用）**
+
+| 排序 | 方向 | 可回收 | 依据 |
+|---|---|---:|---|
+| 1 | GEMM 效率 64.3% → 87% | ≈ 54 ms | 176.1 × (1 − 64.3/87) |
+| 2 | 小算子碎片（Zero / ReduceSum / 搬运 / 转置） | ≈ 30 ms | 需 AscendC 融合或增广写法 |
+| 3 | FA 反向 35% → 45% | ≈ 29 ms | 受 FA v4 内核限制 |
+| 4 | vector 融合减字节（add+norm / silu 合并） | ≈ 30–40 ms | 上限 = 235 × 15% |
+| 5 | cube∥vector 重叠 15% → 30% | ≈ 50 ms | 需换执行形态（图模式 / 融合算子） |
+
+### 4.3 优化执行与收益表（按分类展示）
+
+**分类 ⑤ 布局与内存组织（论文未涉及，本仓独有）**
+
+| 优化项 | 开关 | 单步 Δ | 累计步时 |
+|---|---|---:|---:|
+| 起点 | — | — | 1,942.1 ms |
+| NS 专有 QKV/FFN 由逐 token Linear 合成 bmm | `NS_BMM` | **−25.70%** | 1,442.9 ms |
+| 融合 `npu_rms_norm` 替代手写 norm 链 | `FUSED_NORM` | −14.85% | 1,228.6 ms |
+| 去 cat：预分配 + 原地写 | `CAT_INPLACE` | −9.48% | 1,112.1 ms |
+| 全量投影 + 原地覆盖 NS 行 | `FULL_PROJ` | −11.13% | 823.5 → 753.0 ms |
+| 全量投影与 FA BSH 同开 | — | −3.05% | 753.0 → 730.0 ms |
+
+小计：1,942.1 → 730.0 ms（**−62.41%**）；其中最大单项是把 13 组逐 token 小矩阵乘合成一次 bmm。
+
+**分类 ① 金字塔压缩**
+
+结构内建，无运行期开关。本仓实测开/关为 1.68×，与论文 Table 3 的 3.06× 口径未闭合（论文 3.06 需 K/V 同时剪枝 + 更激进 schedule）。
+
+**分类 ② Cross-request KV 缓存**
+
+**不适用**：训练任务没有 request / 用户历史维度，无法在步内复用 K/V。
+
+**分类 ③ FlashAttention**
+
+| 优化项 | 开关 | 单步 Δ | 累计步时 |
+|---|---|---:|---:|
+| SDPA 内置 causal 替代显式 mask（仅 q_len == k_len 的层） | `SDPA_CAUSAL` | −5.06% | 892.5 → 847.3 ms |
+| FA 切 BSH 布局（省转置） | `FA_BSH` | −2.81%（单算子 −31.7%） | 847.3 → 823.5 ms |
+
+小计：892.5 → 823.5 ms（−7.8%）；本仓用 FA v4（等价于论文 FA-2 的位置），前向 44.8%、反向 35.0%。
+
+**分类 ④ 混合精度 + 激活重算**
+
+| 优化项 | 开关 | 单步 Δ | 累计步时 |
+|---|---|---:|---:|
+| 显式 bf16 干路（关 autocast） | `EXPLICIT_BF16` | **−15.79%** | 730.0 → **614.7 ms** |
+
+重算（`--checkpoint-act`）本身不提速，作用是让每卡 batch 2048 放得下：档 A 752.0 ms / 39.17 GB，档 B 614.7 ms / 58.48 GB。
+本项属**精度档变更**（`mean rel(Δg) = 0.61%`），不能与 L1 布局类优化混谈。
+
+**汇总**：1,942.1 → 614.7 ms（**−68.35%**）= ⑤ 类 −62.41% × ③ 类 −7.8% × ④ 类 −15.79%（按执行顺序累乘）。
 
 ## 5 结论
 
@@ -182,26 +273,28 @@
 
 ### 5.2 性能结论（档 B）
 
-| 指标 | 本仓实测 | 论文（273 ms 档） | 比值 |
+| 指标 | 本仓 | 论文 | 性能比（本仓 / 论文） |
 |---|---:|---:|---:|
-| 稳态步时 | **614.7 ms** | 273 ms | **2.14×** |
-| 全局吞吐 | **53,307.4 sps** | — | — |
-| 每卡吞吐 | **3,331.7 sps** | — | — |
-| 算力利用率 MFU | **31.6%**（主口径 83.8 TFLOP/卡/步） | 论文未给 S 的 MFU | — |
-| 显存峰值 | **58.48 GB** | 27.10 GB | 2.16× |
+| 稳态步时 | **614.7 ms** | 273 ms | **44.4%** |
+| 显存峰值 | **58.48 GB** | 27.10 GB | 215.8% |
 
-累计收益：相对本仓开箱 **−68.35%**（1,942.1 → 614.7 ms）。
+说明：性能比按吞吐口径 = 273 ÷ 614.7 = **44.4%**，即 950DT 的训练吞吐为论文平台的 44.4%（步时为其 2.25 倍）；显存占用为其 2.16 倍。
 
 ### 5.3 理论分析（950DT 与 A100 硬件对比）
 
-| 项 | A100 SXM 80GB | 950DT（本机实测） | 比值 |
+| 项 | A100 SXM 80GB | 950DT（实测） | 比值 |
 |---|---:|---:|---:|
-| bf16 稠密峰值 | 312 TF/s | **432 TF/s** | **1.38×** |
-| HBM 带宽 | 2.04 TB/s | 3.22–3.92 TB/s | 1.6–1.9× |
+| **Cube 算力（bf16 稠密）** | **312 TF/s** | **432 TF/s**（实测 matmul 429.8 = 99.5%） | **1.38×** |
+| **Vector 算力（FP32 元素级）** | 19.5 TF/s（SIMT 峰值） | 无公开 FP32 向量峰值；实测受带宽限制：大张量 add 3328 GB/s → 等效 **0.28 TF/s** | 带宽 1.6× |
+| **Vector 超越函数** | exp2 约 2.4 Tops/s（108 SM） | 实测 **219 Gexp/s、131 Grsqrt/s**（下发受限） | 量级相当 |
+| HBM 带宽 | 2.04 TB/s | 3.22–3.92 TB/s（add 实测 3.3） | 1.6× |
 | 显存容量 | 80 GB | 91.75 GiB | 1.15× |
 | 机器平衡点（算力/带宽） | 153 FLOP/B | 108–135 FLOP/B | 0.7–0.9× |
+| 单 kernel 下发底 | 约 2–3 µs | **5.5 µs**（1M 元素 mul 实测） | 2× |
 
-**理论上限（按本仓当前算子形态与必需字节数）**：
+**Vector 侧说明**：两侧的向量算子都是**带宽或下发受限**，不是算力受限 —— 950DT 大张量 elementwise 等效 0.28 TFLOP/s（3.3 TB/s ÷ 12 B/元素），A100 同理约 0.17 TFLOP/s（2.04 TB/s）。因此"向量算力"实际比的是带宽与下发开销，不是 FLOPs 峰值。
+
+**理论上限（按本仓当前算子形态与必需字节数）**
 
 | 假设 | cube | vector | 步时上限 |
 |---|---:|---:|---:|
@@ -210,13 +303,13 @@
 | cube 打满 + 重叠 30% | 177.4 ms | 235.4 ms | ≈ 350 ms |
 | cube 打满 + 完美重叠 | 177.4 ms | 235.4 ms | **≈240 ms** |
 
-**三条边界条件**：
+**三条边界条件**
+
 1. **vector 已贴峰值**：235.4 ms 是 800 GB/步 ÷ 3.2 TB/s 的硬下限，只能靠融合减少字节（可动上限约 30–40 ms）。
 2. **注意力无量化入口**：`aclnnQuantFlashAttentionScore` 不在 `libopapi.so`，bf16 FA v4 是唯一选择。
 3. **重叠是执行形态问题**：cube∥vector 双流实测重叠仅 15%（串行 2.192 → 并发 2.102 ms），接近 240 ms 必须改执行形态（算子融合 / 图模式），调参无效。
 
-**口径提示**：若论文 273 ms 在 A100（312 TF/s）上取得，则对应算力 = 83.8 TFLOP ÷ 0.273 s = **307 TF/s（A100 稠密峰值的 98%）**，
-说明两侧 FLOP 记账口径不可互算（见附 A）⇒ **比较步时是唯一安全口径**。
+**口径提示**：若论文 273 ms 在 A100（312 TF/s）上取得，则对应算力 = 83.8 TFLOP ÷ 0.273 s = **307 TF/s（A100 稠密峰值的 98%）**，说明两侧 FLOP 记账口径不可互算（见附 A）⇒ **比较步时是唯一安全口径**。
 
 ## 附 A 计算量口径（nominal vs actual）
 
@@ -237,6 +330,6 @@
 | 五阶段迁移细节 | `docs/MIGRATION.md` |
 | TOP-DOWN 分解与 ReduceSum 归因 | `docs/PROFILE_ROUND2_AFTER_OPT.md` §10–§11 |
 | 优化收益逐项 A/B | `docs/OPT_ROUND1_RESULTS.md`、`README.md` §3.0 |
+| Cube / Vector 隔离实测 | `tools/probes/probe_vec_compute.py`、`tools/probes/probe_vec_bandwidth.py` |
 | 论文 4 项优化的昇腾适用性 | `docs/ASSESS_PAPER_4_OPTS_ON_ASCEND.md` |
-| 剩余空间与路径 | `docs/OPT_REMAINING_ROADMAP.md` |
 | 全部原始日志 | `results/`（A/B、profile、fp8/int8 探针） |
