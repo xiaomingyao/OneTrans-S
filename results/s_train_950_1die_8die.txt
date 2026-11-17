@@ -361,3 +361,15 @@ torch.OutOfMemoryError: NPU out of memory. Tried to allocate 2.34 GiB (NPU 0; 91
 # 次数大户: Zero 580 | Cast 569 | Add 479 | ViewCopy 250 | Transpose 241 | TensorMove 236 | BatchMatMul 210 | Muls 162 | ReduceSum 158
 # 方法纠错: record_function 标记 + 区间包含法归属 kernel 是错的(P_loss 算出 337ms), 因 CPU 标记是入队窗口;
 #           改用差分法(全步 - --no-backward)才可信
+
+## 向量侧带宽实测(1 die, 1024x1203x256 bf16, 单张量 602 MiB)
+# SiLU 0.397ms 3178 GB/s | SiLU inplace 0.393ms 3208 | Add(读2写1) 0.587ms 3222
+# npu_rms_norm 0.873ms 1445 GB/s (峰值45%, 疑似读两遍) | 手写rmsnorm(fp32中间) 3.959ms 319 GB/s
+# ⇒ 向量侧唯一有头的是 RMSNorm: 全步 40.1ms 压到 ~18ms 可省 ~22ms(3.6%)
+#
+## 自纠: GEMM 效率 21.4% 是错的(分母只算前向FLOPs)
+# 正确: GEMM 前+反 48.9 TFLOP / 176.1ms = 277.6 TF/s = 64.3%; cube 合计 76.7 TFLOP/348.4ms = 50.9%
+# 修正后瓶颈排序: ①向量侧240ms ②FA反向131ms@35% ③GEMM 176ms@64.3%(不是瓶颈)
+#
+## kernel 时长分布(4037 个/步): <100us 3214 个但只占 30.4ms(4.8%); 1-5ms 106 个占 212ms(33.3%); >5ms 12 个占 136ms(21.4%)
+## Mm p50 408us p90 1955us max 2441us; 最大20%调用占60%时间 ⇒ 时间集中在少数大 kernel, 不是小算子开销
