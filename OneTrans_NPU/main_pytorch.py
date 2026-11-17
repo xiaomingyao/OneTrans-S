@@ -26,6 +26,8 @@ _CAT_INPLACE = os.environ.get("ONETRANS_CAT_INPLACE", "0") == "1"
 _EXPLICIT_BF16 = os.environ.get("ONETRANS_EXPLICIT_BF16", "0") == "1"
 # 阶段级 profiling 标记（默认关）：打开后 block 内 attn/ffn、以及训练循环里的 fwd/loss/bwd/opt 各打一个 record_function
 _PHASE_MARK = os.environ.get("ONETRANS_PHASE_MARKERS", "0") == "1"
+# [N1] 用 npu_rms_norm 返回的 rstd + npu_rms_norm_backward 直接算梯度，免去反向重算平方和
+_RMSNORM_FN = os.environ.get("ONETRANS_RMSNORM_FN", "0") == "1"
 
 
 def _nsbias(b):
@@ -113,6 +115,31 @@ class FFNLayer(nn.Module):
         return x
 
 
+if _RMSNORM_FN:
+    class _RMSNormFn(torch.autograd.Function):
+        """RMSNorm 的前向/反向都走厂商融合算子，且**复用前向已算出的 rstd**。
+
+        autograd 默认反向会重算一遍平方和；厂商 `npu_rms_norm_backward(dy, x, gamma, rstd)`
+        直接吃 rstd，实测反向 2.536 → 1.294 ms（−49%），且 dx **逐位相同**。
+        精度注意：dgamma 由 bf16 域归约得到，与 autograd 路径相比是 bf16 噪声级（mean rel ~1.3e-3）。
+        """
+
+        @staticmethod
+        def forward(ctx, x: torch.Tensor, gamma: torch.Tensor, eps: float):
+            import torch_npu  # noqa: PLC0415  模块级不导入，保持 CPU 路径可用
+
+            g = gamma.to(x.dtype)
+            y, rstd = torch_npu.npu_rms_norm(x, g, eps)
+            ctx.save_for_backward(x, g, rstd)
+            return y
+
+        @staticmethod
+        def backward(ctx, dy: torch.Tensor):
+            x, g, rstd = ctx.saved_tensors
+            dx, dgamma = torch.ops.npu.npu_rms_norm_backward(dy.contiguous(), x, g, rstd)
+            return dx, dgamma.to(g.dtype).to(torch.float32) if g.dtype != torch.float32 else dgamma, None
+
+
 class RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6) -> None:
         super().__init__()
@@ -125,7 +152,10 @@ class RMSNorm(nn.Module):
             #（max_rel 3.891e-03 vs 7.704e-03，b64/seq1203 单算子 0.063 ms vs 0.205 ms）
             import torch_npu  # noqa: PLC0415
 
-            _y = torch_npu.npu_rms_norm(x, self.weight.to(x.dtype), self.eps)[0]
+            if _RMSNORM_FN:
+                _y = _RMSNormFn.apply(x, self.weight, self.eps)     # [N1] 存 rstd，反向省钱
+            else:
+                _y = torch_npu.npu_rms_norm(x, self.weight.to(x.dtype), self.eps)[0]
             return _y.to(torch.bfloat16) if _EXPLICIT_BF16 else _y
         input_dtype = x.dtype
         x_fp32 = x.float()

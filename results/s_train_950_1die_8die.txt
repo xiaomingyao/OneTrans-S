@@ -373,3 +373,11 @@ torch.OutOfMemoryError: NPU out of memory. Tried to allocate 2.34 GiB (NPU 0; 91
 #
 ## kernel 时长分布(4037 个/步): <100us 3214 个但只占 30.4ms(4.8%); 1-5ms 106 个占 212ms(33.3%); >5ms 12 个占 136ms(21.4%)
 ## Mm p50 408us p90 1955us max 2441us; 最大20%调用占60%时间 ⇒ 时间集中在少数大 kernel, 不是小算子开销
+
+## RMSNorm 优化执行结果 (2026-11-17)
+# N1(自定义Function + npu_rms_norm_backward + 存rstd): 单算子探针 -49% 但真模型无变化
+#   真模型(单die b1024, 2 profile 步): N1=0 rmsnorm家族 39.95ms/56次, 步时304.8 | N1=1 40.01ms/56次, 步时304.7
+#   自纠: 探针 A 臂含 x.detach().clone() (602MiB 拷贝~0.5ms) ⇒ 差距被放大; eager autograd 本就用 rstd, 无重算
+# S1a npu_add_rms_norm: 1.448 → 0.966 ms (-33.3%); 返回 (y, rstd, h); h 与 x1+x2 逐位相同(0.000); y 差 1 bf16 ULP(6.25e-2@量级12); 反向抛 RuntimeError 无 autograd
+# 可融合配对: 每个 block 内 attn_out+rms_0[narrow] → rms_1 (14对/步, ~4.3ms=0.7%); 跨block改造后 ~8.3ms(1.35%)
+# 结论: RMSNorm 反向已最优; 前向上限 1.4%; 相对 -187ms 目标不值得投入

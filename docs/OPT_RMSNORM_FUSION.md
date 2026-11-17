@@ -90,3 +90,61 @@ E14 已经实测过：这个融合算子**没有 autograd kernel**，三个输�
 当前 614.3 ms，距「持平」判据 427 ms 还差 **−187 ms**。
 RMSNorm 融合能拿 **20~25 ms（约 13% 的缺口）**，是确定性能拿到的一块；
 剩下的大头仍在 FA 反向（131 ms @35%）与向量侧其它小算子（SiLU/Add 已打满带宽）。
+
+
+---
+
+## 9. 执行结果（2026-11-17）：N1 无效；只剩 add+norm 融合，上限 ~0.7~1.4%
+
+### 9.1 先做 N1（用 `npu_rms_norm_backward` + 已存 rstd 替代 autograd 反向）—— **无效，已回滚为默认关**
+
+实现：`_RMSNormFn`（`ONETRANS_RMSNORM_FN=1`），前向 `npu_rms_norm` 拿 `(y, rstd)` 并存下来，
+反向直接调 `torch.ops.npu.npu_rms_norm_backward(dy, x, gamma, rstd)`，跳过"重算平方和"。
+
+单算子探针结果看着很好（`probe_rmsnorm_bwd.py`）：autograd 反向 2.536 ms → 直接调 1.294 ms（**−49%**），
+且 `dx` **逐位相同**、`dgamma` mean rel 1.3e-3。
+
+**但在真模型里完全没变**（单 die batch 1024，2 个 profile 步）：
+
+| 配置 | 稳态步时 | `rmsnorm` 家族 kernel 合计 |
+|---|---:|---:|
+| N1=0（现状） | 304.8 / 305.1 ms | **39.95 ms / 56 次** |
+| N1=1 | 304.7 ms | **40.01 ms / 56 次** |
+
+**自纠**：探针的 A 臂里我写了 `xx = x.detach().clone().requires_grad_(True)`，
+那个 `clone()` 是 602 MiB 的整张量拷贝（≈0.5 ms），被算进了"autograd 反向"的时间里 ⇒ 把差距放大了。
+真相是：**eager autograd 对 `npu_rms_norm` 本来就用保存的 rstd 调同一个 `npu_rms_norm_backward`**，
+没有"重算平方和"这一步。所以这条优化**不存在**，代码保留但默认关。
+
+### 9.2 厂商 `npu_add_rms_norm` 实测（S1a，`probe_add_rmsnorm_bandwidth.py`）
+
+| 方案 | 时间 | 有效带宽 |
+|---|---:|---:|
+| ① Add 残差（读2写1） | 0.591 ms | 3204 GB/s |
+| ② Add + `npu_rms_norm` 分开（现状） | **1.448 ms** | 2614 GB/s |
+| ③ `npu_add_rms_norm` 融合 | **0.966 ms**（−33.3%） | 2612 GB/s |
+
+数值（1024×1203×256 bf16）：
+
+- 返回 **3 个张量 `(y, rstd, h)`**（不是我原先假设的 `(h, y)`）；
+- `h` 与 `x1 + x2` **逐位相同（max|Δ| = 0.000）**；
+- `y` 与 `npu_rms_norm(h)` 最大差 6.25e-2，出现在量级 ~12 的元素上 ⇒ **就是 1 个 bf16 ULP**；
+- **反向直接抛 `RuntimeError`**（无 autograd），必须自己写 `Function`。
+
+### 9.3 但可融合的配对只有一半 ⇒ 收益 0.7~1.4%
+
+代码里的实际数据流（不是教科书 pre-norm，残差加的是**归一化后**的 q）：
+
+| 位置 | 能否融合 | 说明 |
+|---|---|---|
+| `attn_out + rms_0(x)[narrowed]` → `rms_1` | **能**（14 对/步） | 加法和下一层 norm 都在同一个 block 内 |
+| `ffn_out + h` → 下一 block 的 `rms_0` | 需要跨 block 改造 | block 要把 `(h, y_next)` 交给下一层 |
+| base block 的第一个 `rms_0` | 不能 | 输入是 tokenizer 输出，前面没有 add |
+
+14 对 × 0.48 ms × 形状系数 0.64 ⇒ **≈4.3 ms（0.7%）**；跨 block 改造后可到 **≈8.3 ms（1.35%）**。
+
+### 9.4 结论
+
+- RMSNorm 的**反向**已到厂商最优（`RmsNormGrad` 每步 24.5 ms，按 3 读 1 写算已 ~75-85% 峰值带宽），没有空间；
+- **前向**只有 add+norm 融合这一段，上限 1.4%，且要改 block 之间的接口（跨 block 传 `(h, y)`）；
+- 相对「还要 −187 ms」的目标，**RMSNorm 不是值得投入的地方**，除非顺手做（0.7% 的 intra-block 版本不需要跨 block 改造）。
