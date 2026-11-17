@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OneTrans-S 昇腾 950DT 复刻报告 v6</title>
+<style>
+body{font-family:"Microsoft YaHei","PingFang SC",-apple-system,Segoe UI,sans-serif;max-width:1180px;margin:0 auto;
+padding:32px 28px 60px;color:#1f2328;line-height:1.65;font-size:15px;background:#fff}
+h1{font-size:26px;color:#C00000;border-bottom:3px solid #C00000;padding-bottom:10px;margin:6px 0 18px}
+h2{font-size:20px;color:#C00000;border-left:5px solid #C00000;padding-left:10px;margin:34px 0 12px}
+h3{font-size:16.5px;color:#8B0000;margin:22px 0 8px}
+p{margin:9px 0}
+ul,ol{margin:8px 0 8px 22px;padding:0}li{margin:4px 0}
+.tw{overflow-x:auto;margin:12px 0 16px}
+table{border-collapse:collapse;width:100%;font-size:13.5px}
+th{background:#fbeaea;color:#8B0000;font-weight:600;text-align:left;padding:7px 9px;border:1px solid #e3c9c9}
+td{padding:6px 9px;border:1px solid #e3c9c9;vertical-align:top}
+tbody tr:nth-child(even){background:#fcf8f8}
+code{background:#f4f5f7;border-radius:3px;padding:1px 4px;font-family:Consolas,Menlo,monospace;font-size:12.8px;color:#a03030}
+pre{background:#f7f7f9;border:1px solid #e5e5ea;border-left:4px solid #C00000;border-radius:4px;padding:11px 13px;overflow-x:auto}
+pre code{background:none;color:#24292f;padding:0;font-size:12.6px;line-height:1.5}
+blockquote{margin:10px 0;padding:8px 14px;background:#fdf6f6;border-left:4px solid #d98b8b;color:#5b4b4b}
+hr{border:none;border-top:1px solid #eee;margin:22px 0}
+.meta{color:#666;font-size:13px}
+</style></head><body>
+<h1>OneTrans-S 昇腾 950DT 复刻报告（v6 初稿）</h1>
+<p>&gt; 数据基准：16 die（2 节点 × 8）· CANN 9.1.0 · torch 2.10.0 / torch_npu 2.10.0 · 2026-11-17 &gt; 代码：<code>github.com/xiaomingyao/OneTrans-S</code>（上游 GPU 参考锁定 <code>8febd7e</code>）</p>
+<h2>0 摘要</h2>
+<div class="tw"><table><thead><tr><th>#</th><th>结论</th></tr></thead><tbody><tr><td>1</td><td><strong>复刻等效</strong>：本仓与上游 GPU 参考在同配置下 <strong>949 个张量 key+shape 全等、前向输出 md5 相同、参数量 91,026,946 一致</strong></td></tr><tr><td>2</td><td><strong>步时</strong>：档 A（论文口径，2048/卡 + 重算）<strong>752.0 ms</strong>；档 B（全局对齐，1024×2）<strong>614.7 ms</strong></td></tr><tr><td>3</td><td><strong>判据</strong>（同精度档 273 ms × 1.05 = <strong>287 ms</strong>）：差距 <strong>2.62× / 2.14×</strong>；MFU <strong>25.8% / 31.6%</strong></td></tr><tr><td>4</td><td><strong>根因</strong>：纯计算受限（98.6%），cube 348.4 ms 仅 <strong>50.9%</strong> 效率；vector 侧 240 ms <strong>已贴 HBM 峰值</strong>；cube∥vector 无法重叠（15%）</td></tr><tr><td>5</td><td><strong>天花板</strong>：cube 跑满峰值且 vector 不动 = <strong>426 ms = 273 ms 的 1.56×</strong> ⇒ <strong>287 ms 在现行算法 + 可用算子下不可达</strong></td></tr></tbody></table></div>
+<h2>1 目的与判据</h2>
+<h3>1.1 目的</h3>
+<p>在昇腾 950DT（16 die）上复刻论文 arXiv:2510.26104v3 的 <strong>OneTrans-S 训练</strong>，实测步时 / 吞吐 / 显存 / MFU，与论文 <strong>16×H100</strong> 并列比较。范围：<strong>只训练</strong>，不含推理。</p>
+<h3>1.2 判据三档</h3>
+<p>论文 Table 4 为<strong>单点消融</strong>（四行百分比均相对 407 ms），步时最低是 203 ms（+FA 单点）， 但 <strong>273 ms（+mixed precision + 重算）才是与本仓同精度档、同 batch 口径的一行</strong> ⇒ 主判据取 273。</p>
+<div class="tw"><table><thead><tr><th>档</th><th>论文基准</th><th>判据（×1.05）</th><th>本仓档 A 752.0</th><th>本仓档 B 614.7</th></tr></thead><tbody><tr><td><strong>主判据（同精度档）</strong></td><td><strong>273 ms</strong></td><td><strong>287 ms</strong></td><td><strong>2.62×</strong></td><td>2.14×</td></tr><tr><td>参考（未优化 fp32 基线）</td><td>407 ms</td><td>427 ms</td><td>1.85×</td><td>1.51×</td></tr><tr><td>参考（论文最强单点）</td><td>203 ms</td><td>213 ms</td><td>3.70×</td><td>3.03×</td></tr></tbody></table></div>
+<h3>1.3 口径纪律</h3>
+<ol><li><strong>跨平台只并列不相除</strong>：407/273/203 是 H100 上的论文数字，本仓是 950DT 实测，比值只表示步时之比。</li><li><strong>档 A / 档 B 不混读</strong>：档 A 每卡 2048 + 激活重算（与论文一致）；档 B 每卡 1024×2、无重算（只对齐全局 batch 32,768）。</li><li><strong>精度分两级</strong>：L1 布局类（ns-layout / 去 cat / 全量投影 / FA BSH / SDPA causal）数值等价；<strong>L2 数值档变更</strong>（融合 rms_norm、显式 bf16 干路）单独记账。</li></ol>
+<h2>2 OneTrans-S 模型架构（论文）</h2>
+<h3>2.1 数据流</h3>
+<pre><code>非序列特征 ──Auto-Split tokenizer──┐
+                                   ├─ 12 个 NS token ─┐
+序列特征 ──timestamp-aware 融合─────┘                  ├─ [SEP] + concat → 1203 个位置
+                                   └─ 1190 个 S token ┘
+                                                                  ↓
+                              pyramid stacked OneTrans blocks（逐层尾部截断 1203 → 12）
+                                                                  ↓
+                                          mean pooling → LayerNorm → Linear → sigmoid</code></pre>
+<h3>2.2 两个关键设计</h3>
+<div class="tw"><table><thead><tr><th>设计</th><th>内容</th></tr></thead><tbody><tr><td><strong>参数共享</strong></td><td>序列 token（S）共享<strong>一套</strong> QKV 与 FFN；<strong>每个 NS token 各自一套</strong>（<code>ns_len + 1</code> 组，共 12 + 1）</td></tr><tr><td><strong>金字塔尾部截断</strong></td><td>每个 block 只让<strong>尾部 L 个位置</strong>做 query（K/V 仍为层输入全长），逐层 1190→12，取 32 的倍数，顶层对齐 NS 数 ⇒ 掩码为<strong>底右对齐因果</strong></td></tr><tr><td>其余</td><td>Pre-Norm、RMSNorm、SiLU×2、无 dropout、无 bias 的 LayerNorm head</td></tr></tbody></table></div>
+<h3>2.3 关键超参（论文 §4.1.4 / Table 2）</h3>
+<div class="tw"><table><thead><tr><th>项</th><th>值</th><th>项</th><th>值</th></tr></thead><tbody><tr><td>宽度 d / 头数 H</td><td>256 / 4</td><td>层数</td><td>&quot;6 stacked&quot;（实测口径对应 7 次 block-pass）</td></tr><tr><td>序列长度</td><td>1190 → 12（32 对齐）</td><td>NS token</td><td>12（+[SEP] 1 ⇒ 总 1203）</td></tr><tr><td>参数量</td><td><strong>91 M</strong>（含稀疏 embedding）</td><td>训练算力</td><td>2.64 TFLOPs（nominal，见附 A）</td></tr><tr><td>per-GPU batch</td><td>2048（全局 32,768）</td><td>优化器</td><td>dense RMSProp(5e-3)、sparse Adagrad，无 weight decay</td></tr><tr><td>梯度裁剪</td><td>global grad-norm，dense 90 / sparse 120</td><td>精度</td><td>基线 fp32；优化档 mixed precision</td></tr></tbody></table></div>
+<h3>2.4 论文性能（Table 4，单点消融）</h3>
+<div class="tw"><table><thead><tr><th>形态</th><th>步时</th><th>显存</th></tr></thead><tbody><tr><td>未优化基线</td><td>407 ms</td><td>53.13 GB</td></tr><tr><td>+pyramid</td><td>290 ms</td><td>30.50 GB</td></tr><tr><td>+cross-request KV cache</td><td>284 ms</td><td>22.10 GB</td></tr><tr><td>+FlashAttention</td><td><strong>203 ms</strong></td><td>21.84 GB</td></tr><tr><td><strong>+mixed precision + 重算</strong></td><td><strong>273 ms</strong></td><td>27.10 GB</td></tr></tbody></table></div>
+<p>&gt; OneTrans-S 的 <strong>MFU 论文未给</strong>（Table 5 的 30.8% 属于 OneTransL + bf16），故本报告不列 H100 侧 MFU。</p>
+<h2>3 迁移适配</h2>
+<h3>3.1 训练环境</h3>
+<div class="tw"><table><thead><tr><th>项</th><th>值</th></tr></thead><tbody><tr><td>加速器</td><td>Ascend950DT_9582，<strong>16 die = 2 节点 × 8</strong>（122 + 111），1 die = 1 卡</td></tr><tr><td>软件栈</td><td>CANN 9.1.0 · torch 2.10.0+cpu · torch_npu 2.10.0 · triton 3.2.0</td></tr><tr><td>单卡算力</td><td>bf16 Cube <strong>432 TF/s</strong>（32 AI core × 1650 MHz；真机 matmul 校核 429.8 TF = 99.5%）</td></tr><tr><td>单卡 HBM</td><td>容器可见 <strong>91.75 GiB/die</strong>（标称 144 GB，差异待核）；实测带宽 3.22–3.92 TB/s</td></tr><tr><td>对照 H100 SXM</td><td>bf16 989.4 TF/s · 80 GB HBM3 · 3.35 TB/s · 机器平衡点 295（本机 108–135）</td></tr></tbody></table></div>
+<h3>3.2 代码适配（基于上游 <code>WestbrookLong/OneTrans_Pytorch</code> @ <code>8febd7e</code>）</h3>
+<div class="tw"><table><thead><tr><th>类别</th><th>改动</th><th>说明</th></tr></thead><tbody><tr><td><strong>等价（L1）</strong></td><td>NS 专有 QKV/FFN 由逐 token Linear 合成 <code>bmm</code>（<code>NS_BMM</code>）</td><td>单算子 −8.7%，输出逐位相同</td></tr><tr><td></td><td>去 <code>cat</code>：预分配 + 原地写（<code>CAT_INPLACE</code>）</td><td>Cat 51.4→7.8 ms/步</td></tr><tr><td></td><td>全量投影 + 原地覆盖 NS 行（<code>FULL_PROJ</code>）</td><td>省一次整块 alloc + 一次全量写</td></tr><tr><td></td><td>FA <code>BSH</code> 布局（<code>FA_BSH</code>）</td><td>单算子 −31.7%，q 1 ULP</td></tr><tr><td></td><td>SDPA 内置 causal（<code>SDPA_CAUSAL</code>）</td><td>仅 <code>q_len == k_len</code> 的层等价</td></tr><tr><td><strong>数值档变更（L2）</strong></td><td>融合 <code>npu_rms_norm</code> 替代手写 norm 链（<code>FUSED_NORM</code>）</td><td>对 fp64 参考反而更准（3.891e-3 vs 7.704e-3）</td></tr><tr><td></td><td><strong>显式 bf16 干路</strong>（<code>EXPLICIT_BF16</code>）</td><td>关 autocast；`mean rel</td><td>Δg</td><td>= 0.61%`，属精度档变更</td></tr><tr><td><strong>工程</strong></td><td>torchrun + DDP、合成数据常驻 device、profiler 钩子、阶段标记</td><td>步时口径不含取数与 H2D</td></tr></tbody></table></div>
+<h3>3.3 与上游逐位等价核验（<code>tools/probes/compare_upstream_model.py</code>）</h3>
+<div class="tw"><table><thead><tr><th>校验项</th><th>结果</th></tr></thead><tbody><tr><td>参数量</td><td>91,026,946（两边相同）</td></tr><tr><td>state_dict</td><td><strong>949 个张量，key 集合与形状全等，0 处不同</strong></td></tr><tr><td>前向输出 md5（同种子权重 + 同输入）</td><td><strong><code>c4392b1c57956629…</code> 完全相同</strong></td></tr><tr><td>pyramid schedule</td><td><code>[1203, 960, 736, 480, 256, 12]</code>（相同）</td></tr></tbody></table></div>
+<p>⇒ 本仓在优化开关全关时与上游<strong>同义</strong>；所有偏差都来自上表的显式开关。</p>
+<h3>3.4 与论文对齐评估</h3>
+<div class="tw"><table><thead><tr><th>项</th><th>论文</th><th>本仓</th><th>判定</th></tr></thead><tbody><tr><td>结构（d/H/序列/NS/SEP/共享/PreNorm/掩码）</td><td>256 / 4 / 1190→12 / 12 / 有 / 是 / 底右因果</td><td>同</td><td>✅</td></tr><tr><td>参数量</td><td>91 M（含稀疏表）</td><td><strong>91,026,946</strong>（纯稠密）</td><td>✅ 数值 / ⚠️ 构成不同</td></tr><tr><td>per-GPU batch</td><td>2048</td><td>档 A = 2048</td><td>✅</td></tr><tr><td><strong>计算量</strong></td><td>2.64 TFLOPs（nominal 6ND）</td><td><strong>2.649 TFLOPs（同口径，差 0.03%）</strong>；实际分组计算 <strong>40.91 GFLOP/样本</strong></td><td>✅ 同口径一致（附 A）</td></tr><tr><td><strong>梯度裁剪</strong></td><td>global grad-norm，dense 90</td><td><strong>未实现</strong></td><td>⚠️ 缺失</td></tr><tr><td><strong>优化器</strong></td><td>RMSProp(5e-3)</td><td>AdamW(5e-3)</td><td>⚠️ 不同（不影响步时口径）</td></tr><tr><td><strong>FFN 宽度</strong></td><td>论文未给</td><td>1536（=6×d）</td><td>⚠️ 推定值（靠它把参数对齐到 91 M）</td></tr><tr><td>层数表述</td><td>&quot;6 stacked&quot;</td><td>1 base + 6 pyramid = 7 个 block</td><td>⚠️ 歧义（论文 nominal 算力按 7 次 pass 才对得上）</td></tr></tbody></table></div>
+<h2>4 性能优化</h2>
+<h3>4.1 冒烟与开箱性能</h3>
+<div class="tw"><table><thead><tr><th>配置</th><th>步时</th><th>MFU</th><th>HBM</th></tr></thead><tbody><tr><td><strong>开箱（无任何优化，档 A）</strong></td><td><strong>1,942.1 ms</strong></td><td>7.70%</td><td>52.30 GB</td></tr><tr><td>开箱（1 die，batch 256）</td><td>233.7 ms</td><td>8.00%</td><td>20.79 GB</td></tr><tr><td>开箱（16 die，档 A，全局 32,768）</td><td>1,942.1 ms</td><td>7.70%</td><td>52.30 GB</td></tr></tbody></table></div>
+<h3>4.2 Profiling TOP-DOWN（当前最优配置，3 个稳态步）</h3>
+<div class="tw"><table><thead><tr><th>层</th><th>数字</th><th>结论</th></tr></thead><tbody><tr><td>调度</td><td>Computing <strong>605.5 ms = 98.6%</strong>；通信 19.5（暴露 4.7）；气泡 4.1</td><td><strong>纯计算受限</strong>，调度/通信/气泡合计 1.5%</td></tr><tr><td>阶段</td><td>前向 164.2 ms / 反向+优化+通信 471.9 ms（2.87×）</td><td>反向是主战场</td></tr><tr><td>算子族</td><td>cube <strong>348.4 ms @50.9%</strong>：FA 前 41.0（44.8%）、<strong>FA 反 131.3（35.0%）</strong>、GEMM 176.1（64.3%）；vector ~240 ms：Add 57.7 / SiLU 56.5 / 搬运 46.3 / RMSNorm 40.1 / ReduceSum 21.1 / Zero 14.0</td><td>cube 一半算力在空转；vector 已贴峰值</td></tr><tr><td>关键约束</td><td>① vector 带宽 3178–3358 GB/s（≈峰值，不可再快）② cube∥vector 双流重叠仅 <strong>15%</strong> ③ 注意力<strong>无任何量化入口</strong>（<code>aclnnQuantFlashAttentionScore</code> 不在 libopapi.so）</td><td>决定可达上限</td></tr></tbody></table></div>
+<h3>4.3 优化执行与收益表（16 die · n=8 中位）</h3>
+<div class="tw"><table><thead><tr><th>#</th><th>优化</th><th>开关</th><th>步时</th><th>相对起点</th><th>MFU</th><th>类别</th></tr></thead><tbody><tr><td>—</td><td>起点</td><td>—</td><td>1,942.1 ms</td><td>—</td><td>7.70%</td><td>—</td></tr><tr><td>1</td><td>NS 专有投影合成 bmm</td><td><code>NS_BMM</code></td><td>1,442.9 ms</td><td>−25.70%</td><td>10.36%</td><td>L1</td></tr><tr><td>2</td><td>融合 rms_norm</td><td><code>FUSED_NORM</code></td><td>1,228.6 ms</td><td>−36.74%</td><td>12.17%</td><td>L2</td></tr><tr><td>3</td><td>去 cat（原地写）</td><td><code>CAT_INPLACE</code></td><td>1,112.1 ms</td><td>−42.74%</td><td>13.44%</td><td>L1</td></tr><tr><td>4</td><td>换档 B（1024×2、无重算）</td><td>—</td><td>959.2 ms</td><td>−50.61%</td><td>15.58%</td><td>口径</td></tr><tr><td>5</td><td>SDPA 内置 causal</td><td><code>SDPA_CAUSAL</code></td><td>847.3 ms</td><td>−56.37%</td><td>17.64%</td><td>L1</td></tr><tr><td>6</td><td>FA <code>BSH</code> + 全量投影</td><td><code>FA_BSH</code> + <code>FULL_PROJ</code></td><td>730.0 ms</td><td>−62.41%</td><td>20.48%</td><td>L1</td></tr><tr><td>7</td><td><strong>显式 bf16 干路</strong></td><td><code>EXPLICIT_BF16</code></td><td><strong>614.7 ms</strong></td><td><strong>−68.35%</strong></td><td><strong>31.6%</strong></td><td>L2</td></tr></tbody></table></div>
+<p>&gt; 档 A（论文口径，同配置 + 激活重算）：<strong>752.0 ms / MFU 25.8% / HBM 39.17 GB</strong>。 &gt; MFU 为&quot;主口径&quot;（Linear/mm + attention 因果半三角 = 83.8 TFLOP/卡/步）；只算 Linear/mm 的下界为 24.3% / 19.9%。</p>
+<h3>4.4 否决清单（同口径实测，避免重复投入）</h3>
+<div class="tw"><table><thead><tr><th>项</th><th>一句话原因</th></tr></thead><tbody><tr><td>图模式（capture / TorchAir）</td><td>attention 算子全部不可捕获（107025）；且气泡上限仅 0.8%</td></tr><tr><td>自写 attention（Triton）</td><td>前向慢 2.32–3.12×；理论上限 0.6%（算术强度 481，算力受限）</td></tr><tr><td>FP8 训练</td><td><code>torch.mm</code>/<code>npu_quant_matmul</code> 报 161002；<code>_scaled_mm</code> 0.3 TF/s（回退路径）</td></tr><tr><td>量化版 attention</td><td>底层 <code>aclnnQuantFlashAttentionScore</code> 缺失，bf16 输入都报错</td></tr><tr><td>int8 训练</td><td>GEMM 真有 2×（802 TF/s），但量化误差 2.5–4.6%（bf16 0.61%）</td></tr><tr><td>add+silu / add+norm 融合</td><td>前者无配对位置、Triton 静默不执行；后者上限 0.7–1.35%</td></tr><tr><td>RMSNorm 自定义反向</td><td>真模型零收益（autograd 本就用 rstd）</td></tr><tr><td>cube 三杠杆（qkv 合并 / <code>inner_precise</code> / mask dtype）</td><td>0.07%/步 或完全无差别</td></tr><tr><td>Embedding 异构缓存、cross-request KV cache</td><td>本仓无稀疏表、无 request/历史维度</td></tr><tr><td>每卡 4096 / 2048 免重算 / <code>torch.compile</code> / DDP 各开关</td><td>算子失败、OOM 或 ±0.1% 噪声</td></tr></tbody></table></div>
+<h2>5 结论</h2>
+<h3>5.1 复刻等效性</h3>
+<p>与上游 GPU 参考<strong>逐位等价</strong>（949 张量、前向 md5 同、参数 91,026,946、schedule 同）； 与论文主干超参对齐，<strong>4 处差异已标注</strong>（梯度裁剪缺失、优化器不同、FFN 宽度为推定、层数表述歧义）。 计算量在同一 nominal 口径下与论文一致（2.649 T vs 2.648 T/样本）。</p>
+<h3>5.2 性能结论</h3>
+<div class="tw"><table><thead><tr><th>口径</th><th>步时</th><th>全局 sps</th><th>MFU（主口径）</th><th>显存</th><th>vs 273 ms</th></tr></thead><tbody><tr><td>档 A（论文口径）</td><td><strong>752.0 ms</strong></td><td>43,575.4</td><td><strong>25.8%</strong></td><td>39.17 GB</td><td><strong>2.62×</strong></td></tr><tr><td>档 B（全局对齐）</td><td><strong>614.7 ms</strong></td><td>53,307.4</td><td><strong>31.6%</strong></td><td>58.48 GB</td><td>2.14×</td></tr></tbody></table></div>
+<h3>5.3 为什么 287 ms 不可达（三条硬约束）</h3>
+<ol><li><strong>vector 已贴峰值</strong>：240 ms，带宽 3178–3358 GB/s；只能靠融合减少字节。</li><li><strong>attention 无法加速</strong>：FA 27.8 TFLOP 跑满 bf16 峰值也要 64 ms ⇒ <strong>240 + 64 = 304 ms &gt; 287 ms</strong>；且无量化入口。</li><li><strong>硬件峰值只有一半</strong>：950DT bf16 432 TF = H100 989.4 TF 的 <strong>43.7%</strong> ⇒ cube 即使 100% 也要 177.5 ms，加 vector 240 = <strong>426 ms（1.56×）</strong>。</li></ol>
+<h3>5.4 可达路径与待办</h3>
+<div class="tw"><table><thead><tr><th>阶段</th><th>动作</th><th>档 B 步时</th><th>MFU</th></tr></thead><tbody><tr><td>现状</td><td>—</td><td>615 ms</td><td>31.6%</td></tr><tr><td>A</td><td>模型内 GEMM 277 → 400 TF/s（隔离同形状实测可达 376–427）</td><td>561 ms</td><td>34.6%</td></tr><tr><td>+C</td><td>零碎确定性（ReduceSum/Zero/搬运/add+norm/NS GEMM/图模式/通信）</td><td>531 ms</td><td>36.5%</td></tr><tr><td>+D</td><td>int8 只换 GEMM（精度档变更）</td><td>470 ms</td><td>41.3%</td></tr><tr><td>+E</td><td>减算力 −10%（与论文结构冲突）</td><td>408 ms</td><td>47.5%</td></tr></tbody></table></div>
+<p><strong>待办</strong>：① 补 global grad-norm clipping（dense 90）；② GEMM 277→400 的逐层归因；③ MFU 收敛为单一算子级口径。</p>
+<h2>附 A 计算量口径（nominal vs actual）</h2>
+<div class="tw"><table><thead><tr><th>口径</th><th>公式</th><th>本仓值</th><th>论文</th></tr></thead><tbody><tr><td><strong>nominal（论文同口径，6ND）</strong></td><td><code>6 × N × Σ(block-pass token)</code> = 6 × 91,026,946 × 4850</td><td><strong>2.6489 TFLOP/样本</strong></td><td>2.6481 TFLOP</td></tr><tr><td><strong>actual（按分组形状）</strong></td><td>逐层 QKV/FFN/attention 实际矩阵乘</td><td><strong>40.91 GFLOP/样本</strong>（83.8 TFLOP/卡/步）</td><td>论文未给</td></tr></tbody></table></div>
+<p><strong>关系</strong>：nominal 把全部 91 M 参数乘到每个位置，而实际只用到 13 组中的 1 组 ⇒ <strong>nominal = actual × 64.7</strong>。 ⇒ nominal 只能用于与论文同口径对齐，<strong>不能当 MFU 分子</strong>（否则会得出&quot;峰值 1%&quot;的假数）。</p>
+<h2>附 B 证据索引</h2>
+<div class="tw"><table><thead><tr><th>结论</th><th>文件 / 提交</th></tr></thead><tbody><tr><td>与上游逐位等价</td><td><code>tools/probes/compare_upstream_model.py</code>、<code>docs/MODEL_ALIGNMENT_AUDIT.md</code></td></tr><tr><td>论文数字与口径（唯一真源）</td><td><code>docs/TOPIC_ONETRANS_S.md</code> §1、§4.1</td></tr><tr><td>论文 4 项优化在昇腾的适用性</td><td><code>docs/ASSESS_PAPER_4_OPTS_ON_ASCEND.md</code></td></tr><tr><td>TOP-DOWN 分解与 ReduceSum 归因</td><td><code>docs/PROFILE_ROUND2_AFTER_OPT.md</code> §10–§11</td></tr><tr><td>剩余空间与路径</td><td><code>docs/OPT_REMAINING_ROADMAP.md</code></td></tr><tr><td>否决项证据</td><td><code>docs/OneTrans-S_950DT_Optimization_v5_20261117.md</code> §5、<code>docs/OPT_TRITON_MIXED_MHA_ASSESSMENT.md</code></td></tr><tr><td>全部原始日志</td><td><code>results/</code>（A/B、profile、fp8/int8 探针）</td></tr></tbody></table></div>
+<h2>附 C 复现命令（3 条）</h2>
+<pre><code># 单 die 冒烟（约 3 分钟）
+ASCEND_RT_VISIBLE_DEVICES=0 python3 scripts/run_onetrans_s.py --device npu \
+  --batch-size 1024 --steps 30 --warmup 5 --checkpoint-act --flops-per-sample 31529400000
+
+# 16 die 双档（档 B）
+torchrun --nproc_per_node 8 --nnodes 2 scripts/run_onetrans_s.py --device npu \
+  --batch-size 1024 --grad-accum 2 --steps 30 --warmup 5
+
+# 16 die profile（3 稳态步）
+torchrun --nproc_per_node 8 --nnodes 2 scripts/run_onetrans_s.py --device npu \
+  --batch-size 1024 --grad-accum 2 --steps 25 --warmup 20 --profile-steps 3 --profile-dir /tmp/pf</code></pre>
+</body></html>
