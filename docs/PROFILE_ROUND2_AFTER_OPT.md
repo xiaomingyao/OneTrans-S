@@ -216,3 +216,21 @@ ReduceSum 20.6（158）｜ Transpose 13.3 ｜ FA 附属转置 14.8 ｜ Slice 5.4
 | O1 | 除 norm 外全线显式 bf16（干路激活不再走 autocast 边界），权重另存 fp32 master 供优化器 | 直接消灭 ~145 次大激活 cast（58 ms 中的大头） | −40~55 ms（5~7%），精度需门禁 |
 | O2 | NS 权重按组拆成独立 Parameter（13×3 与 FFN 两组），彻底不切参数 | 消灭 12 行形状的 slice_backward/zeros/copy（~70+ 次） | −15~25 ms（2~3%），改 state_dict 命名 |
 | O3 | 减少梯度累加节点（accum 2→1） | InplaceAdd 85 ms 里 162 次来自 2 个 micro-batch 的累加 | 需 per-GPU 2048 + 重算 = 档 A，整体更慢，否决 |
+
+
+### 7.1 Cube 侧三个杠杆的实测（全部否决）
+
+`tools/probes/probe_cube_levers.py`，单 die、当前配置（bf16 干路）：
+
+| 杠杆 | 实测 | 判定 |
+|---|---|---|
+| **qkv 投影合并**：同输入上 3 次 `linear(256→256)` → 1 次 `linear(256→768)` | (B1024·L1203) 1.244 → 1.136 ms（**−8.7%**），输出 **逐位相同** | 单算子有效，但每步 qkv 总时长仅约 **5.0 ms**（fwd），折算每步只省 **≈0.44 ms（0.07%）** ⇒ 不值得改 |
+| **FA `inner_precise=1`**（高性能模式） | fwd 2.999→2.995 ms、fwd+bwd 14.766→14.769 ms | **完全无差别** |
+| **mask dtype bool → uint8** | fwd 2.996 ms、fwd+bwd 14.764 ms | **完全无差别** |
+
+同时算出 FA 的实际效率：单次 fwd+bwd（B1024·H4·Lq480·Lk1203·D64）算力 ≈1.06 TFLOP / 14.77 ms
+⇒ **71.8 TF/s = 432 TF 的 16.6%**。这是厂商融合算子在「带掩码 + q≠k」形状下的实际水平，
+没有 API 旋钮能改；要提只能自写 AscendC kernel 或走图模式（后者仍卡在旁路 stream 未 join）。
+
+⇒ **cube 侧在当前栈上已无便宜的杠杆**。剩余空间只在这三类里：① 图模式专项（定位算子内部旁路 stream）；
+② AscendC 自写 attention/融合算子（工程量大）；③ 结构性减算力（更激进 pyramid / K-V 剪枝，**与论文冲突**）。
