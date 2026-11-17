@@ -381,3 +381,13 @@ torch.OutOfMemoryError: NPU out of memory. Tried to allocate 2.34 GiB (NPU 0; 91
 # S1a npu_add_rms_norm: 1.448 → 0.966 ms (-33.3%); 返回 (y, rstd, h); h 与 x1+x2 逐位相同(0.000); y 差 1 bf16 ULP(6.25e-2@量级12); 反向抛 RuntimeError 无 autograd
 # 可融合配对: 每个 block 内 attn_out+rms_0[narrow] → rms_1 (14对/步, ~4.3ms=0.7%); 跨block改造后 ~8.3ms(1.35%)
 # 结论: RMSNorm 反向已最优; 前向上限 1.4%; 相对 -187ms 目标不值得投入
+
+## ReduceSum 21ms 归因 (2026-11-17)
+# 邻居链: SiluGrad(3.60) → Mm(2.27) → Mm(2.43) → ReduceSum(1.17) → Add(0.60) → Cast(0.002)  600
+#   ⇒ 就是 F.linear 的 db = dy.sum(0)，非 clip_grad_norm（全仓无此调用）
+# 每步 200 次 / 21.05 ms（3 步 21.07/21.07/21.05）；谱: 0-20us 120次1.18ms | 20-100 20次1.48 | 100-300 48次8.82 | 300-600 4次1.59 | >600 8次7.98
+# 隔离(1.23Mx1024): bf16 contiguous 0.751ms/3358GB/s(已峰值); fp32 1.288/3919; sum(dtype=fp32) 3.863/653GB/s(5.1x慢); 非连续转置 12.989/194GB/s(17x慢); ones@dy 0.782/3228(0.96x 无收益)
+# ⇒ 「消除 ReduceSum −20ms」估算撤回，实际 ≤8ms 且需 AscendC 融合或 [x|1] 增广(out>in 层才净赚)
+# 向量侧已贴峰值: SiLU 3178 / Add 3222 / sum(0) 3189-3358 GB/s ⇒ 240ms ≈ 800GB/步 的必然结果，小算子优化无空间
+# Triton 元素级融合三次作废: 32MiB得4455GB/s(超峰值) → 2.52GB得213247GB/s(异步) → 逐次sync仍127781GB/s且 max|Δ|=0.00(empty_like 复用刚释放缓冲 ⇒ kernel 静默未执行)
+# 判据: 带宽>4000GB/s 直接 INVALID; 融合对拍必须预填垃圾值输出缓冲
