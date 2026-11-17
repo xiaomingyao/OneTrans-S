@@ -46,6 +46,17 @@ def convert(md: str) -> str:
     i = 0
     while i < len(lines):
         ln = lines[i]
+        m_img = re.match(r"^!\[([^\]]*)\]\(([^)]+)\)\s*$", ln.strip())
+        if m_img:
+            alt, src = m_img.group(1), m_img.group(2)
+            out.append(
+                f'<figure><img src="{html.escape(src)}" alt="{html.escape(alt)}" '
+                f'style="max-width:100%;height:auto">'
+                + (f"<figcaption>{html.escape(alt)}</figcaption>" if alt else "")
+                + "</figure>"
+            )
+            i += 1
+            continue
         if ln.startswith("```"):
             i += 1
             buf = []
