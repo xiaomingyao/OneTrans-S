@@ -231,30 +231,32 @@ CPU 标记是**入队窗口**，设备 kernel 要到 `loss.item()` 同步时才�
 
 | 档 | 项 | 预估 | 前提 / 阻塞 |
 |---|---|---:|---|
-| **一（确定性）** | `ReduceSum 20.8 ms / 158 次` 定位并消除 | **−20** | 至今未定位（Python 层每步只发 1 次 `mean`） |
-| | `Zero 14.0 ms / 580 次` | −14 | autograd 的 `zeros_like`；参数按组拆 + 自定义反向 |
-| | 搬运/重排残余（`TensorMove 26.0`、`Transpose 11.6`） | −15 | G3 已吃大头，剩 NS 路径与 narrow |
+| **一（确定性）** | `ReduceSum 21.05 ms / 200 次`（**归因 = Linear 的 bias 梯度 `dy.sum(0)`**） | **−8** | 已贴峰值（3189–3358 GB/s）；换 cube 的 `ones@dy` 0.96× 无收益 ⇒ **原 −20 ms 估算已撤回**，见 `docs/PROFILE_ROUND2_AFTER_OPT.md` §11 |
+| | `Zero 14.0 ms / 580 次` | −6 | 都是 `zeros_like` 紧跟 `TensorMove`/`Slice`（autograd 的 slice/expand 反向） |
+| | 搬运/重排残余（`TensorMove 26.0`、`Transpose 28.4 / 485 次`） | −5 | p50 仅 9.6 µs；主要是 NS 12 行路径与 ViewCopy 链 |
 | | NS 12 行小 GEMM 合并（210 次 × 18 µs） | −3.8 | 已验证逐位相同 |
 | | add+norm 融合（intra-block 14 对） | −4.3 | `npu_add_rms_norm` 已验证 |
 | | 图模式消 launch | −4.1 | 就是气泡上限 |
 | | 通信暴露部分 | −4.7 | — |
-| | **小计** | **≈ −67** | ⇒ **548 ms（MFU 27.3%）** |
+| | **小计** | **≈ −30** | ⇒ **584 ms（MFU 24.9%）**（原估 −67 ms 已下修） |
 | **二（cube 效率）** | FA 反向 35% → 45%（追平前向） | −29 | API 旋钮全灭、Triton 自写更慢 |
 | | GEMM 64.3% → 75% | −25 | 形状天生小（M=12/256, N=256） |
-| | **小计** | **≈ −54** | ⇒ **493 ms（MFU 30.3%）** |
+| | **小计** | **≈ −54** | ⇒ **554 ms（MFU 27.0%）** |
 | **三（要决策）** | 自定义反向（压反向那 ~195 ms 向量算子海） | **−90** | 等于重写全部 backward |
 | | FP8 训练 | cube 理论 ×2 | 需 scale recipe，精度风险最高 |
 | | 减算力（K/V 剪枝 / 更激进 pyramid / ns_len） | 每 −10% 算力 ≈ −35 ms | **与论文结构冲突（已冻结）** |
 | | 档 A 专项：分块重算 | 档 A 752 → ~700 | 只改善论文口径那一列 |
 
-**结论**：不碰算法与数值精度，天花板 **493 ms（MFU 30.3%）**，**到不了 427 ms**。
+**结论**：不碰算法与数值精度，天花板 **554 ms（MFU 27.0%）**，**到不了 427 ms**。
 要「持平 H100」，只能在**自定义反向**或 **FP8 / 减算力**上做一次大改；零碎优化凑不出来。
+
+**本节的一处自我纠错**：本报告首次交付时把 `ReduceSum 20.8 ms` 标成「可消除 −20 ms」，据此把一档小计写成 −67 ms、下限写成 493 ms。归因做完后**撤回**：这 21 ms 是 Linear 的 bias 梯度 `dy.sum(0)`，隔离实测在 contiguous bf16 上已是 **3358 GB/s（贴峰值）**，换 cube 的 `ones@dy` 只有 0.96×；向量侧同样已贴峰值（SiLU 3178 / Add 3222 GB/s）。真正剩下的只有"每个 dy 被第三遍读"这一结构性冗余，量级 ≤8 ms，且需要 AscendC 融合或 `[x|1]` 增广（只对 `out>in` 的层净赚）。证据见 `docs/PROFILE_ROUND2_AFTER_OPT.md` §11。
 
 ## 8 未闭合项（明确未做/未定，不含推测）
 
 1. **论文 Table 3 的 pyramid 算术倍率口径**：本仓 pyramid 开/关实测 **1.68×**，论文表格口径 3.06×；
    按论文正文写法（只剪 query、K/V 为层输入全序列）计算为 **1.66×**，与实测自洽 ⇒ 判为**论文表格口径待核**，不为它改码。
-2. **`ReduceSum 20.8 ms / 158 次`** 与 **`Zero 14.0 ms / 580 次`** 的来源：全仓无 `clip_grad_norm_`、无 `.sum(` 调用，
+2. **`ReduceSum` / `Zero` 的来源**：`ReduceSum` **已归因**为 `F.linear` 的 bias 梯度 `db = dy.sum(0)`（邻居链 `SiluGrad → Mm → Mm → ReduceSum → Add → Cast`，每步 200 次 / 21.05 ms，隔离实测已贴峰值，见 §7 自纠）；`Zero`（580 次 / 14.0 ms）确认为 `zeros_like` 紧跟 `TensorMove`/`Slice` 的 autograd slice/expand 反向，但**具体发起点仍未逐条打点**，不作结论。
    `probe_op_callers` 证明 Python 层每步只发 14 次 `to`、6 次 `narrow` ⇒ 归因未定位，不作结论。
 3. **图模式**：手动 capture 已确认被 attention 算子内部的旁路 stream 封死；TorchAir 卡在"我们的投影/掩码写法对图编译器不友好"
    （`k-axis 1191`），要吃 GE 融合需先做 trace 友好化改造，未排期。
