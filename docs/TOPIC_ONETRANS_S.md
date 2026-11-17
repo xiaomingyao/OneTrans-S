@@ -318,3 +318,8 @@ attention 的每样本 FLOPs：fwd = 4·Σ(Lq·Lk)·d_total = **5.36 GFLOP**、b
    每参数每 token：nominal 6 FLOP vs actual **0.09 FLOP**）。
    ⇒ nominal 的 TF/s（4.31 / 6.49）只有硬件峰值 1% 量级，**绝不能当 MFU**；
    利用率只能用 actual 口径（本仓 40.91 GFLOP/样本 → 83.8 TFLOP/卡/步 → MFU 31.6%）。
+
+- **embedding 表体量：论文全文零披露**（无表数量、无行数/基数、无 embedding 维度）。
+  §4.1.2 原文 "We report Params (model parameters **excluding** sparse embeddings) and TFLOPs"
+  ⇒ 91 M 是**纯稠密口径**，表体量不在其中；本文档任何"表大小"数字都只能是推断（dataset 有 10.2 M items / 27.9 M users 可作行数量级线索），
+  不得表述为论文给出的规格。

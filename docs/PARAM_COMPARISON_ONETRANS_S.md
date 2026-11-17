@@ -114,7 +114,7 @@ N_params ≈ 7 × [ (ns_len + 1) × 197,376      # QKV（每组）
 
 | 差异 | 事实 | 影响 |
 |---|---|---|
-| **含稀疏 embedding** | 论文 Params 明确 "including sparse embeddings"，本仓纯稠密 | 数值巧合相等、构成不同；若论文 S 的稀疏表占 10–20 M，则其稠密主干比本仓小 |
+| **不含稀疏 embedding** | 论文 Params 明确 "excluding sparse embeddings"，本仓纯稠密 | **同口径**：91 M vs 91,026,946（差 0.03%）；论文的表体量完全未披露，不进这个数 |
 | **tokenizer 规模** | 论文 Group-wise 变体 78 M（比 S 少 13 M）⇒ 其 tokenizer 变体对总量影响达 13 M；本仓 tokenizer 仅 0.81 M | 唯一无法闭合的结构性差异，可能意味着论文 timestamp-aware fusion 的投影更重 |
 
 ## 7 复现

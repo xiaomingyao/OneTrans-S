@@ -41,7 +41,7 @@ non_seq_dim=256, seq_feat_dim=64, num_classes=2, multi_num=1, mask=paper_causal`
 | 层数 | "6 stacked OneTrans blocks" | **1 base + 6 pyramid = 7 个 block** | ⚠️ 表述歧义（见 §2.1），参数量却与论文 91 M 吻合 |
 | 宽度 d_model | 256 | 256 | ✅ |
 | 头数 H | 4 | 4 | ✅ |
-| 参数目标 | ≈100 M（Table 2 记 **91 M**，含 sparse embedding） | **91,026,946**（**纯稠密**，无稀疏表） | ✅ 数值一致 / ⚠️ 构成不同 |
+| 参数目标 | ≈100 M（Table 2 记 **91 M**，**不含** sparse embedding） | **91,026,946**（**纯稠密**，无稀疏表） | ✅ **同口径一致** |
 | 序列 token | 1190 → 12，逐层线性收缩，取 32 的倍数，顶层对齐 NS 数 | `linear_pyramid_schedule(1203,12,6,32)` = `[1203,960,736,480,256,12]` | ✅ |
 | NS token | 12（= 顶层序列长度） | 12 | ✅ |
 | [SEP] token | 有（Table 3 Row 3 专门消融"去掉 [SEP]"） | 有（`use_sep_token=True`，总长 1203 = 1190+12+1） | ✅ |
@@ -61,12 +61,12 @@ non_seq_dim=256, seq_feat_dim=64, num_classes=2, multi_num=1, mask=paper_causal`
    且只有在 `ffn_hidden=1536` 时参数量才刚好落到 **91,026,946 ≈ 论文 91 M**。
    若论文的 6 是"总层数"，则我们的 block 数多 1、且 FFN 宽度需另调才能到 91 M —— 两个自由度互相补偿，
    **无法从论文文字唯一确定**，故标注为**推定**，不声称"完全对齐"。
-2. **参数量口径**：论文明确 "Params **including sparse embeddings**"；本仓是纯稠密实现（无稀疏表），
-   91 M 是"稠密参数刚好等于论文的含稀疏总数"，数值巧合一致、构成不同 ⇒ 不构成结构等价性证明。
+2. **参数量口径**：论文明确 "Params (model parameters **excluding** sparse embeddings)"；本仓是纯稠密实现（无稀疏表），
+   两者**同口径**（都只数稠密参数），91 M 与 91,026,946 相差 0.03% ⇒ 构成可比的等价性证据（不是数值巧合）。
 
 ## 3 计算量对账（2.64 TFLOPs）
 
-论文原文（§4.1.2 脚注段）："We report Params (model parameters including sparse embeddings) and
+论文原文（§4.1.2 脚注段）："We report Params (model parameters **excluding** sparse embeddings) and
 **TFLOPs (training compute in TFLOPs at batch size 2048)**"。
 
 | 读法 | 论文 | 本仓（主口径） | 倍数 |

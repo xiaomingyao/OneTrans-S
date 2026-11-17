@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>模型结构对账</title>
+<style>
+body{font-family:"Microsoft YaHei","PingFang SC",-apple-system,Segoe UI,sans-serif;max-width:1180px;margin:0 auto;
+padding:32px 28px 60px;color:#1f2328;line-height:1.65;font-size:15px;background:#fff}
+h1{font-size:26px;color:#C00000;border-bottom:3px solid #C00000;padding-bottom:10px;margin:6px 0 18px}
+h2{font-size:20px;color:#C00000;border-left:5px solid #C00000;padding-left:10px;margin:34px 0 12px}
+h3{font-size:16.5px;color:#8B0000;margin:22px 0 8px}
+p{margin:9px 0}
+ul,ol{margin:8px 0 8px 22px;padding:0}li{margin:4px 0}
+.tw{overflow-x:auto;margin:12px 0 16px}
+table{border-collapse:collapse;width:100%;font-size:13.5px}
+th{background:#fbeaea;color:#8B0000;font-weight:600;text-align:left;padding:7px 9px;border:1px solid #e3c9c9}
+td{padding:6px 9px;border:1px solid #e3c9c9;vertical-align:top}
+tbody tr:nth-child(even){background:#fcf8f8}
+code{background:#f4f5f7;border-radius:3px;padding:1px 4px;font-family:Consolas,Menlo,monospace;font-size:12.8px;color:#a03030}
+pre{background:#f7f7f9;border:1px solid #e5e5ea;border-left:4px solid #C00000;border-radius:4px;padding:11px 13px;overflow-x:auto}
+pre code{background:none;color:#24292f;padding:0;font-size:12.6px;line-height:1.5}
+blockquote{margin:10px 0;padding:8px 14px;background:#fdf6f6;border-left:4px solid #d98b8b;color:#5b4b4b}
+hr{border:none;border-top:1px solid #eee;margin:22px 0}
+.meta{color:#666;font-size:13px}
+
+table.tree{width:100%;border-collapse:collapse;font-size:13px;margin:10px 0}
+table.tree th{background:#111827;color:#fff;font-weight:600;padding:7px 9px;text-align:left;white-space:nowrap}
+table.tree td{padding:6px 9px;border-bottom:1px solid #e5e7eb;vertical-align:top;line-height:1.55}
+table.tree tr.lv1{background:#eef2f7;font-weight:700}
+table.tree tr.lv2{background:#fff;font-weight:600}
+table.tree tr.lv3{background:#fcfdff}
+table.tree tr.tv{cursor:pointer}
+table.tree tr.tv:hover{background:#e8f2ff}
+table.tree tr.hid{display:none}
+table.tree .tf{display:inline-block;width:1.15em;color:#2563eb;font-size:10px;vertical-align:1px}
+table.tree .tf.off{visibility:hidden}
+</style></head><body>
+<h1>模型结构对账：论文 vs 上游 GPU 参考 vs 本仓昇腾（2026-11-17）</h1>
+<p>对象：</p>
+<ul><li>论文 <code>papers/OneTrans_2510.26104v3.txt</code> §4.1.4 / Table 2</li><li>上游 GPU 参考 <code>WestbrookLong/OneTrans_Pytorch</code>（submodule <code>GPU_Reference</code>，commit <code>8febd7e</code>）</li><li>本仓 <code>OneTrans_NPU/</code>（main_pytorch.py + models/taac_onetrans.py）</li></ul>
+<h2>0 结论</h2>
+<ol><li><strong>本仓与上游 GPU 参考：结构逐位等价</strong>（不是&quot;大致相同&quot;，是同一份定义 + 一层可关的 NPU 优化开关）。 证据：同一配置下 <strong>949 个张量、state_dict 的 key 集合与形状全等、前向输出 md5 完全相同</strong>、参数量同为 <strong>91,026,946</strong>、 pyramid schedule 同为 <code>[1203, 960, 736, 480, 256, 12]</code>。</li><li><strong>本仓与论文：主干超参对齐，但有 4 处需要标注的差异/推定</strong>（见 §2 表的「⚠️」行）： 梯度裁剪缺失、优化器不同、FFN 宽度未知（以参数量反推）、「6 stacked blocks」与我们的 7 个 block 的表述歧义。</li><li><strong>论文的 2.64 TFLOPs 无法与本仓对账</strong>，且该数字在论文自身口径下不自洽（见 §3）⇒ 只能当&quot;论文自报&quot;引用。</li></ol>
+<h2>1 与上游的机器对账（<code>tools/probes/compare_upstream_model.py</code>）</h2>
+<p>两边模块同名（<code>main_pytorch</code> / <code>models.taac_onetrans</code>），故各起一个进程 dump 到 json 后比对：</p>
+<div class="tw"><table><thead><tr><th>校验项</th><th>上游 GPU_Reference</th><th>本仓 OneTrans_NPU</th><th>一致</th></tr></thead><tbody><tr><td>参数量</td><td>91,026,946</td><td>91,026,946</td><td>✅</td></tr><tr><td>state_dict 张量数</td><td>949</td><td>949</td><td>✅</td></tr><tr><td>key 集合</td><td>—</td><td>—</td><td>✅ 全等（双方独有均为 0）</td></tr><tr><td>张量形状</td><td>—</td><td>—</td><td>✅ 0 处不同</td></tr><tr><td>pyramid schedule</td><td><code>[1203,960,736,480,256,12]</code></td><td>同</td><td>✅</td></tr><tr><td>前向输出 md5（同 seed 权重 + 同输入，CPU）</td><td><code>c4392b1c57956629…</code></td><td><code>c4392b1c57956629…</code></td><td>✅ <strong>逐位相同</strong></td></tr><tr><td>输出形状 / absmax</td><td><code>[2,2]</code> / 0.29727</td><td>同</td><td>✅</td></tr></tbody></table></div>
+<p>配置：<code>d_model=256, heads=4, ffn_hidden=1536, ns_len=12, seq_len=1190, pyramid=6, align=32, sep=1, non_seq_dim=256, seq_feat_dim=64, num_classes=2, multi_num=1, mask=paper_causal</code>。</p>
+<p>唯一的代码差异是<strong>可关闭的 NPU 优化开关</strong>（<code>ONETRANS_NS_BMM</code> / <code>FUSED_NORM</code> / <code>CAT_INPLACE</code> / <code>SDPA_CAUSAL</code> / <code>FA_BSH</code> / <code>FULL_PROJ</code> / <code>EXPLICIT_BF16</code> / <code>RMSNORM_FN</code> / <code>PHASE_MARKERS</code>）+ 阶段标记，默认全关时与上游同义。</p>
+<h2>2 与论文逐项对账</h2>
+<div class="tw"><table><thead><tr><th>项</th><th>论文</th><th>本仓</th><th>判定</th></tr></thead><tbody><tr><td>层数</td><td>&quot;6 stacked OneTrans blocks&quot;</td><td><strong>1 base + 6 pyramid = 7 个 block</strong></td><td>⚠️ 表述歧义（见 §2.1），参数量却与论文 91 M 吻合</td></tr><tr><td>宽度 d_model</td><td>256</td><td>256</td><td>✅</td></tr><tr><td>头数 H</td><td>4</td><td>4</td><td>✅</td></tr><tr><td>参数目标</td><td>≈100 M（Table 2 记 <strong>91 M</strong>，<strong>不含</strong> sparse embedding）</td><td><strong>91,026,946</strong>（<strong>纯稠密</strong>，无稀疏表）</td><td>✅ <strong>同口径一致</strong></td></tr><tr><td>序列 token</td><td>1190 → 12，逐层线性收缩，取 32 的倍数，顶层对齐 NS 数</td><td><code>linear_pyramid_schedule(1203,12,6,32)</code> = <code>[1203,960,736,480,256,12]</code></td><td>✅</td></tr><tr><td>NS token</td><td>12（= 顶层序列长度）</td><td>12</td><td>✅</td></tr><tr><td>[SEP] token</td><td>有（Table 3 Row 3 专门消融&quot;去掉 [SEP]&quot;）</td><td>有（<code>use_sep_token=True</code>，总长 1203 = 1190+12+1）</td><td>✅</td></tr><tr><td>参数共享</td><td>S token 共享一套 QKV/FFN；每个 NS token 独立一套</td><td><code>kqv_list[ns_len+1]</code> + <code>ffn_list[ns_len+1]</code>，seq 用第 <code>ns_len</code> 组</td><td>✅</td></tr><tr><td>Pre-Norm</td><td>是</td><td><code>rms_0 → attn → +res → rms_1 → ffn → +res</code></td><td>✅</td></tr><tr><td>因果/金字塔掩码</td><td>金字塔尾部截断 ⇒ 底右对齐因果</td><td><code>paper_causal</code>：<code>col ≤ row + (Lk − Lq)</code></td><td>✅</td></tr><tr><td>per-GPU batch</td><td>2048</td><td>档 A = 2048（档 B = 1024×2）</td><td>✅（档 A）</td></tr><tr><td><strong>梯度裁剪</strong></td><td><strong>global grad-norm clipping，dense 90 / sparse 120</strong></td><td><strong>未实现</strong>（<code>grep clip_grad</code> 只在 <code>tests/</code> 里出现）</td><td>⚠️ <strong>训练配置缺失</strong></td></tr><tr><td><strong>优化器</strong></td><td>双优化器、无 weight decay：sparse→Adagrad，dense→<strong>RMSProp(lr=0.005)</strong></td><td>统一 <strong>AdamW(lr=5e-3)</strong></td><td>⚠️ 不同（不影响步时口径，影响收敛）</td></tr><tr><td><strong>FFN 宽度</strong></td><td><strong>论文未给</strong></td><td><code>ffn_hidden=1536</code>（= 6×d）</td><td>⚠️ <strong>推定值</strong>：靠它把参数量对齐到 91 M（上游默认 256 只有 ~31 M）</td></tr><tr><td>精度档</td><td>基线 fp32；优化后 &quot;mixed precision&quot;</td><td>bf16（档 A 含激活重算；O1 显式 bf16 为精度档变更）</td><td>✅ 对应&quot;mixed precision&quot;那一档</td></tr><tr><td>DCNv2+DIN 对照</td><td>Table 2 给了 13.4% MFU、1.43 TFLOPs</td><td>—</td><td>不需对齐</td></tr></tbody></table></div>
+<h3>2.1 两个需要写进报告的口径说明</h3>
+<ol><li><strong>层数口径</strong>：论文正文说 &quot;6 stacked OneTrans blocks&quot;，但我们的实现是 <strong>base block + 6 个 pyramid block</strong>（上游亦如此）， 且只有在 <code>ffn_hidden=1536</code> 时参数量才刚好落到 <strong>91,026,946 ≈ 论文 91 M</strong>。 若论文的 6 是&quot;总层数&quot;，则我们的 block 数多 1、且 FFN 宽度需另调才能到 91 M —— 两个自由度互相补偿， <strong>无法从论文文字唯一确定</strong>，故标注为<strong>推定</strong>，不声称&quot;完全对齐&quot;。</li><li><strong>参数量口径</strong>：论文明确 &quot;Params (model parameters <strong>excluding</strong> sparse embeddings)&quot;；本仓是纯稠密实现（无稀疏表）， 两者<strong>同口径</strong>（都只数稠密参数），91 M 与 91,026,946 相差 0.03% ⇒ 构成可比的等价性证据（不是数值巧合）。</li></ol>
+<h2>3 计算量对账（2.64 TFLOPs）</h2>
+<p>论文原文（§4.1.2 脚注段）：&quot;We report Params (model parameters <strong>excluding</strong> sparse embeddings) and <strong>TFLOPs (training compute in TFLOPs at batch size 2048)</strong>&quot;。</p>
+<div class="tw"><table><thead><tr><th>读法</th><th>论文</th><th>本仓（主口径）</th><th>倍数</th></tr></thead><tbody><tr><td>每步（batch 2048，单卡）</td><td>2.64 TFLOP</td><td><strong>83.8 TFLOP</strong></td><td><strong>31.7×</strong></td></tr><tr><td>每样本</td><td>1.29 GFLOP</td><td>40.91 GFLOP</td><td><strong>31.7×</strong>（同比例）</td></tr><tr><td>下界口径（本仓只算 Linear/mm）</td><td>—</td><td>64.6 TFLOP/步</td><td>24.5×</td></tr></tbody></table></div>
+<p><strong>但论文这一列自身不自洽</strong>：一次前向就要 <code>2 × 91 M × 1190 = 216.6 GFLOP/sample</code>， batch 2048 摊下来是 <strong>443 TFLOP</strong>，已经是 2.64 TFLOP 的 <strong>168 倍</strong>——还没算反向。 ⇒ 2.64 TFLOPs <strong>不可能</strong>是&quot;batch 2048 的训练计算量&quot;，只能是某种归一化/笔误； 它的唯一可用之处是 Table 2 内部的相对比较（2.64T vs RankMixer+Transformer 2.51T）。</p>
+<p><strong>本仓的计算量是自洽的</strong>：91 M 参数里绝大部分是 <strong>13 组 NS/seq 分组的 QKV 与 FFN</strong> （序列 token 只用其中 1 组），所以每 token 的有效算力远低于&quot;全部参数都作用到每个 token&quot;的朴素估算： 40.91 GFLOP/sample ÷ 1203 token = 34.0 MFLOP/token。</p>
+<h2>4 待办</h2>
+<ol><li><strong>补 global grad-norm clipping</strong>（dense 90）—— 论文明确要求，本仓缺；只影响收敛行为，不影响步时口径， 但作为&quot;复刻&quot;应当补上，并在报告 §2 口径里注明&quot;性能档未开裁剪&quot;。</li><li>把 §2.1 的两条推定（层数口径、FFN 宽度）写进报告 v5 的&quot;未闭合项&quot;。</li><li>（可选）把优化器换成论文的 RMSProp 做一次 loss 轨迹对照，验证收敛无系统性偏差。</li></ol>
+<script>
+(function(){
+  var tables=[].slice.call(document.querySelectorAll('table.tree'));
+  tables.forEach(function(t){
+    var rows=[].slice.call(t.querySelectorAll('tbody tr'));
+    rows.forEach(function(r){ if(+r.dataset.lv>1) r.classList.add('hid'); });
+    function kids(i){ return rows.filter(function(x){ return x.dataset.p===String(i); }); }
+    function collapse(i){
+      kids(i).forEach(function(k){
+        k.classList.add('hid');
+        var tf=k.querySelector('.tf'); if(tf) tf.textContent='▶';
+        collapse(k.dataset.i);
+      });
+    }
+    t.addEventListener('click', function(e){
+      var tr=e.target.closest('tr.tv'); if(!tr) return;
+      var tf=tr.querySelector('.tf'); if(!tf || tf.classList.contains('off')) return;
+      var open=tf.textContent.trim()==='▼';
+      if(open){ collapse(tr.dataset.i); tf.textContent='▶'; }
+      else { kids(tr.dataset.i).forEach(function(k){ k.classList.remove('hid'); }); tf.textContent='▼'; }
+    });
+  });
+})();
+</script>
+</body></html>

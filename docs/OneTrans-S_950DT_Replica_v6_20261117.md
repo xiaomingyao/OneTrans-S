@@ -119,7 +119,7 @@
 | 掩码 | 金字塔尾部截断 ⇒ 底右因果 | `paper_causal`：`col ≤ row + (Lk−Lq)` | ✅ |
 | Pre-Norm / SiLU×2 | 是 | 是 | ✅ |
 | 位置编码 | 图中标注，**未给形式** | **无可训练位置编码参数** | ⚠️ 未闭合 |
-| 参数量 | 91 M（**含 sparse embedding**） | **91,026,946**（纯稠密，无稀疏表） | ✅ 数值 / ⚠️ 构成不同 |
+| 参数量 | 91 M（**不含 sparse embedding**，原文 "excluding sparse embeddings"） | **91,026,946**（纯稠密，无稀疏表） | ✅ **同口径一致** |
 | 计算量 | 2.6481 TFLOPs（nominal 6ND） | **2.6489 TFLOPs**（同口径，差 0.03%） | ✅（附 A） |
 
 **训练层**
@@ -140,7 +140,8 @@
 |---|---|---|
 | 结构差异 | tokenizer 规模：论文 Group-wise 变体省 13 M ⇒ 其 tokenizer 远重于本仓的 0.81 M | ❌ 论文未披露内部投影方式 |
 | 训练差异 | 优化器不同（AdamW vs RMSProp/Adagrad）、**grad-norm clip 未实现** | ✅ clip 一行可补；优化器可换 |
-| 口径差异 | 参数量含稀疏表 vs 纯稠密；层数 6 vs 7 pass | ⚠️ 已标注 |
+| 口径差异 | 层数 6 vs 7 pass（论文 2.64 T 需 7 次 block-pass） | ⚠️ 已标注 |
+| 不可对账 | **embedding 表体量**：论文全文未披露表数量 / 行数 / 维度（且 Params 明确取 "excluding sparse embeddings"），本仓无表 | ❌ 无从对账 |
 | 本仓多出 | 8 个算子级开关（合计 −68.35%）、DDP、profiling 钩子 | 论文侧无对应 |
 
 ### 3.4 当前实现的算子与组件依赖
