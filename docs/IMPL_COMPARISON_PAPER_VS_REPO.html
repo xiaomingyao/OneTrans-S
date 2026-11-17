@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>实现层对比：论文 vs 上游 vs 本仓</title>
+<style>
+body{font-family:"Microsoft YaHei","PingFang SC",-apple-system,Segoe UI,sans-serif;max-width:1180px;margin:0 auto;
+padding:32px 28px 60px;color:#1f2328;line-height:1.65;font-size:15px;background:#fff}
+h1{font-size:26px;color:#C00000;border-bottom:3px solid #C00000;padding-bottom:10px;margin:6px 0 18px}
+h2{font-size:20px;color:#C00000;border-left:5px solid #C00000;padding-left:10px;margin:34px 0 12px}
+h3{font-size:16.5px;color:#8B0000;margin:22px 0 8px}
+p{margin:9px 0}
+ul,ol{margin:8px 0 8px 22px;padding:0}li{margin:4px 0}
+.tw{overflow-x:auto;margin:12px 0 16px}
+table{border-collapse:collapse;width:100%;font-size:13.5px}
+th{background:#fbeaea;color:#8B0000;font-weight:600;text-align:left;padding:7px 9px;border:1px solid #e3c9c9}
+td{padding:6px 9px;border:1px solid #e3c9c9;vertical-align:top}
+tbody tr:nth-child(even){background:#fcf8f8}
+code{background:#f4f5f7;border-radius:3px;padding:1px 4px;font-family:Consolas,Menlo,monospace;font-size:12.8px;color:#a03030}
+pre{background:#f7f7f9;border:1px solid #e5e5ea;border-left:4px solid #C00000;border-radius:4px;padding:11px 13px;overflow-x:auto}
+pre code{background:none;color:#24292f;padding:0;font-size:12.6px;line-height:1.5}
+blockquote{margin:10px 0;padding:8px 14px;background:#fdf6f6;border-left:4px solid #d98b8b;color:#5b4b4b}
+hr{border:none;border-top:1px solid #eee;margin:22px 0}
+.meta{color:#666;font-size:13px}
+
+table.tree{width:100%;border-collapse:collapse;font-size:13px;margin:10px 0}
+table.tree th{background:#111827;color:#fff;font-weight:600;padding:7px 9px;text-align:left;white-space:nowrap}
+table.tree td{padding:6px 9px;border-bottom:1px solid #e5e7eb;vertical-align:top;line-height:1.55}
+table.tree tr.lv1{background:#eef2f7;font-weight:700}
+table.tree tr.lv2{background:#fff;font-weight:600}
+table.tree tr.lv3{background:#fcfdff}
+table.tree tr.tv{cursor:pointer}
+table.tree tr.tv:hover{background:#e8f2ff}
+table.tree tr.hid{display:none}
+table.tree .tf{display:inline-block;width:1.15em;color:#2563eb;font-size:10px;vertical-align:1px}
+table.tree .tf.off{visibility:hidden}
+</style></head><body>
+<h1>实现层对比：论文规定 vs 上游 GPU 参考 vs 本仓昇腾</h1>
+<p>&gt; 对照三方：<strong>论文文字</strong>（<code>arXiv:2510.26104v3</code>，无开源代码）/ <strong>上游 GPU 参考</strong>（<code>WestbrookLong/OneTrans_Pytorch@8febd7e</code>）/ <strong>本仓</strong>（<code>OneTrans_NPU</code>，950DT 16 die） &gt; 代码锚点均指 <code>OneTrans_NPU/main_pytorch.py</code>（行号为 <code>8febd7e</code> 基线上本仓版本） &gt; 性能数字：16 die、全局 batch 32,768、n=8 中位，逐项 A/B 单独开</p>
+<h2>0 结论</h2>
+<div class="tw"><table><thead><tr><th>#</th><th>结论</th></tr></thead><tbody><tr><td>1</td><td><strong>算法层</strong>（块结构、参数共享、金字塔、掩码、Pre-Norm）三方一致，本仓与上游<strong>逐位等价</strong></td></tr><tr><td>2</td><td><strong>算子层</strong>是本仓唯一实质改写的地方：把 7 类&quot;逐 token 小算子&quot;换成批量/融合算子 —— 这是 −68.35% 的全部来源</td></tr><tr><td>3</td><td><strong>训练配置层</strong>本仓落后论文两项：双优化器（用 AdamW 代替）与 grad-norm clip（<strong>未实现</strong>）</td></tr><tr><td>4</td><td><strong>分布式层</strong>论文只说 data-parallel + all-reduce；上游是单卡；本仓用 torchrun + DDP over HCCL</td></tr><tr><td>5</td><td>所有算子替换都能给&quot;精度取证&quot;：6 项 L1 逐位/1 ULP，2 项 L2 数值档变更（相对 fp64 更准或 0.61% 梯度偏差）</td></tr></tbody></table></div>
+<h2>1 对比边界（必须先声明）</h2>
+<ul><li><strong>论文没有代码</strong>（<code>grep github/release</code> 零命中）⇒ &quot;论文的实现&quot;只能取<strong>文字规定的算法</strong>，无法核对真实码；</li><li><strong>上游是第三方二手重实现</strong>（TF demo → PyTorch），只提供&quot;算法如何落成 PyTorch&quot;的参考，不代表论文作者写法；</li><li>因此下表&quot;论文&quot;列写&quot;文字是否规定&quot;，不写&quot;论文怎么实现&quot;。</li></ul>
+<h2>2 逐模块实现对照</h2>
+<div class="tw"><table><thead><tr><th>模块</th><th>论文（文字）</th><th>上游 GPU 参考</th><th>本仓昇腾</th><th>差异性质</th></tr></thead><tbody><tr><td>Block 结构</td><td>Pre-Norm：RMSNorm→MixAttn→残差→RMSNorm→MixFFN→残差</td><td>同</td><td>同（<code>rms_0/attn/rms_1/ffn</code>），另提供 <code>_attn_part_impl</code>/<code>_ffn_part_impl</code> 两个可独立调用的分段入口（L474/L489）</td><td>等价</td></tr><tr><td><strong>QKV 组织</strong></td><td>S 共享一套、每个 NS 各一套</td><td><code>kqv_list[13]</code>，<strong>逐 token 调 Linear</strong>（每步 12×3 次 1-token matmul）</td><td>默认同一写法；<code>NS_BMM=1</code> 时把 13 组拼成 <strong>1 次 bmm</strong>（L195/L400）</td><td><strong>实现改写（L1，逐位相同）</strong></td></tr><tr><td>Attention 内核</td><td>FlashAttention-2</td><td><code>F.scaled_dot_product_attention</code></td><td><code>npu_fusion_attention</code>（aclnn <strong>FA v4</strong>，L342）；<code>SDPA_CAUSAL=1</code> 时少数层用内置 causal（L353）</td><td><strong>算子替换（L1）</strong></td></tr><tr><td>布局</td><td>未规定</td><td>BHSD 连续</td><td><code>FA_BSH=1</code> 走 <strong>BSH 布局</strong>，省两次 transpose+contiguous（L337）</td><td>实现改写（L1，q 1 ULP）</td></tr><tr><td>Mask</td><td>底右对齐因果（金字塔尾部截断）</td><td>显式建 mask 张量</td><td>同（缓存 <code>_MASK_CACHE</code>，L234）；注意 <strong>FA 的 <code>atten_mask</code> 语义是 True=屏蔽</strong>，与 SDPA 相反</td><td>语义对齐，极性易错</td></tr><tr><td><strong>FFN</strong></td><td>每 token 一套、SiLU×2</td><td><code>ffn_list[13]</code>，逐 token</td><td>同，但 <code>FULL_PROJ=1</code> 时改为<strong>全量投影 + 原地覆盖 NS 行</strong>（L288/L435）</td><td>实现改写（L1）</td></tr><tr><td><strong>Norm</strong></td><td>RMSNorm</td><td>手写 <code>x * rsqrt(mean(x²)+eps) * w</code></td><td><code>FUSED_NORM=1</code> 走厂商 <code>torch_npu.npu_rms_norm</code>（L158）；反向用 <code>npu_rms_norm_backward</code> 复用 rstd（L139）</td><td>算子融合（L2，相对 fp64 更准）</td></tr><tr><td><strong>序列拼接</strong></td><td>[SEP] + concat</td><td><code>torch.cat</code>（每步 51.4 ms）</td><td><code>CAT_INPLACE=1</code> 预分配 + 原地写（L312）</td><td>实现改写（L1，逐位相同）</td></tr><tr><td><strong>精度路径</strong></td><td>BF16/FP16 + 激活重算</td><td><code>autocast(fp16)</code></td><td>默认 autocast bf16；<code>EXPLICIT_BF16=1</code> 关 autocast + 权重影子缓存（L26/L64），loss 前 logits 回 fp32</td><td><strong>精度档变更（L2）</strong></td></tr><tr><td>反向</td><td>未规定</td><td>autograd</td><td>autograd（FA/FFN/QKV 全走厂商 backward），无自写 kernel</td><td>等价</td></tr><tr><td><strong>分布式</strong></td><td>data-parallel，16 GPU all-reduce</td><td><strong>单卡</strong>（无 init_process_group）</td><td><code>torchrun</code> + DDP over HCCL，<code>broadcast_buffers=False</code>、<code>find_unused_parameters=True</code></td><td>实现补齐</td></tr><tr><td><strong>优化器</strong></td><td>双优化器、无 wd：sparse Adagrad(0.1,1.0) / dense RMSProp(0.005,0.99999,0)</td><td><code>AdamW(lr=1e-3, wd=1e-4)</code></td><td><code>AdamW(lr=5e-3, wd=0)</code></td><td>⚠️ 与论文不同</td></tr><tr><td><strong>梯度裁剪</strong></td><td>global grad-norm，dense 90 / sparse 120</td><td>无</td><td><strong>未实现</strong></td><td>❌ 缺口</td></tr><tr><td>数据管道</td><td>工业全量特征</td><td>HF <code>datasets</code> + <code>DataLoader</code>，每步取数</td><td>合成 token <strong>常驻 device</strong>（<code>--source synth</code>），步时不含取数与 H2D</td><td>口径选择</td></tr><tr><td>Profiling</td><td>未提</td><td>无</td><td><code>--profile-steps</code> 设备侧 profile + 阶段标记</td><td>工具补齐</td></tr></tbody></table></div>
+<h2>3 算子改写的代价与收益（16 die 实测）</h2>
+<div class="tw"><table><thead><tr><th>改写</th><th>开关</th><th>单步 Δ</th><th>精度取证</th><th>归类</th></tr></thead><tbody><tr><td>13 组逐 token QKV/FFN → bmm</td><td><code>NS_BMM</code></td><td><strong>−25.70%</strong></td><td>输出逐位相同</td><td>L1</td></tr><tr><td>手写 RMSNorm 链 → <code>npu_rms_norm</code></td><td><code>FUSED_NORM</code></td><td><strong>−14.85%</strong></td><td>对 fp64：3.891e-3（手写 7.704e-3）⇒ 更准</td><td>L2（更优）</td></tr><tr><td><code>cat</code> → 预分配 + 原地写</td><td><code>CAT_INPLACE</code></td><td><strong>−9.48%</strong></td><td>逐位相同</td><td>L1</td></tr><tr><td>显式 mask → 内置 causal（q==k 的层）</td><td><code>SDPA_CAUSAL</code></td><td><strong>−5.06%</strong></td><td>logits 逐位 0.0</td><td>L1</td></tr><tr><td>BHSD → BSH 布局</td><td><code>FA_BSH</code></td><td><strong>−2.81%</strong>（单算子 −31.7%）</td><td>q 1 ULP（9.766e-4）</td><td>L1</td></tr><tr><td>逐 token 投影 → 全量投影 + 原地覆盖</td><td><code>FULL_PROJ</code></td><td><strong>−11.13%</strong></td><td>dk/dv 逐位</td><td>L1</td></tr><tr><td>autocast → 显式 bf16 干路</td><td><code>EXPLICIT_BF16</code></td><td><strong>−15.79%</strong></td><td><code>mean rel(Δg)=0.61%</code>、无 NaN</td><td>L2（档变更）</td></tr><tr><td><strong>累计</strong></td><td>—</td><td><strong>−68.35%</strong>（1,942.1 → 614.7 ms）</td><td>—</td><td>—</td></tr></tbody></table></div>
+<h2>4 kernel 落点证据（每步计数，batch 1024×2、7 block）</h2>
+<div class="tw"><table><thead><tr><th>算子</th><th>每步次数</th><th>说明</th></tr></thead><tbody><tr><td><code>FlashAttentionScoreV4</code> / <code>…GradV4</code></td><td>14 / 14</td><td>= 7 block × 2 micro-batch ⇒ 布局与调用对齐</td></tr><tr><td><code>RmsNorm</code> / <code>RmsNormGrad</code></td><td>28 / 28</td><td>= 7 × 2 × 2（rms_0+rms_1）</td></tr><tr><td><code>Silu_Swish</code> / <code>SiluBackward</code></td><td>54 / 54</td><td>FFN 两处 SiLU × 13 组 × 2 mb 摊平后的落点</td></tr><tr><td><code>ReduceSum</code></td><td>200</td><td>= <code>F.linear</code> 的 bias 梯度 <code>dy.sum(0)</code></td></tr><tr><td><code>InplaceZero_ZerosLike</code></td><td>580</td><td>24 µs/次，下发受限</td></tr><tr><td><code>InplaceCopy_TensorMove</code> / <code>…Transpose</code></td><td>236 / 241</td><td>布局拷贝，插在 GEMM 之间</td></tr></tbody></table></div>
+<p>判据：<strong>每类 kernel 的次数必须能与「block 数 × micro-batch × 组数」对上</strong>，否则说明改写改错了层（本仓 14/28/54 三项都精确对上）。</p>
+<h2>5 数值证据（L1 与 L2 分级，不可混谈）</h2>
+<div class="tw"><table><thead><tr><th>项</th><th>判据</th><th>结果</th></tr></thead><tbody><tr><td>logits（SDPA causal vs 显式 mask）</td><td>逐位</td><td><strong>0.0</strong></td></tr><tr><td>QKV bmm vs 逐 token Linear</td><td>逐位</td><td><strong>0.0</strong></td></tr><tr><td>FA BSH vs BHSD</td><td>dq / dk / dv</td><td>dk、dv <strong>逐位</strong>；dq <strong>1 ULP（9.766e-4）</strong></td></tr><tr><td>全量投影 + 原地覆盖</td><td>dk/dv</td><td><strong>逐位</strong></td></tr><tr><td>融合 RMSNorm（前向）</td><td>对 fp64 相对误差</td><td><strong>3.891e-3</strong> vs 手写 7.704e-3</td></tr><tr><td>显式 bf16 干路</td><td>loss rel / 梯度</td><td>loss <strong>9.8e-5</strong>；<code>max|Δg| = 5.33e-4</code>；<code>mean rel(Δg, |g|≥1e-2) = 6.1e-3</code></td></tr><tr><td>全模型三关</td><td>张量 / loss / 梯度</td><td>1.49e-7 / 5.96e-8 / 4.88e-4 ⇒ 全 PASS</td></tr></tbody></table></div>
+<h2>6 未闭合与实现自由度</h2>
+<div class="tw"><table><thead><tr><th>项</th><th>现状</th><th>能否闭合</th></tr></thead><tbody><tr><td>梯度裁剪</td><td>未实现</td><td>能（一行 <code>clip_grad_norm_</code>），论文明确要求</td></tr><tr><td>双优化器</td><td>AdamW 单优化器</td><td>能（本仓无稀疏表，dense 换 RMSProp 即可），但会改收敛轨迹</td></tr><tr><td>tokenizer 结构</td><td>0.81 M vs 论文变体差异 13 M</td><td><strong>不能</strong>：论文未披露 tokenizer 内部投影方式</td></tr><tr><td>位置编码</td><td>本仓无可训练位置编码参数</td><td><strong>不能</strong>：论文只画了 &quot;Positional Information&quot; 方框</td></tr><tr><td>层数口径</td><td>7 次 block-pass（1 base + 6 pyramid）</td><td>推断（论文文字 6，但其 TFLOPs 按 7 次才对得上 2.64 T）</td></tr><tr><td>数据管道</td><td>合成 token 常驻，不含取数</td><td>刻意：保证&quot;纯计算口径&quot;，与论文不可比时间部分已隔离</td></tr></tbody></table></div>
+<h2>7 一句话总结</h2>
+<p><strong>算法照论文、算子照昇腾、训练配置半个论文</strong>： 结构与参数可在代码级逐项对到论文，算子层做了 7 处替换（全部有逐位/ULP 取证）， 但双优化器与 grad-norm clip 两项论文明确规定的训练配置尚未补齐 —— 补齐不影响步时口径，只影响&quot;复刻完整性&quot;。</p>
+<script>
+(function(){
+  var tables=[].slice.call(document.querySelectorAll('table.tree'));
+  tables.forEach(function(t){
+    var rows=[].slice.call(t.querySelectorAll('tbody tr'));
+    rows.forEach(function(r){ if(+r.dataset.lv>1) r.classList.add('hid'); });
+    function kids(i){ return rows.filter(function(x){ return x.dataset.p===String(i); }); }
+    function collapse(i){
+      kids(i).forEach(function(k){
+        k.classList.add('hid');
+        var tf=k.querySelector('.tf'); if(tf) tf.textContent='▶';
+        collapse(k.dataset.i);
+      });
+    }
+    t.addEventListener('click', function(e){
+      var tr=e.target.closest('tr.tv'); if(!tr) return;
+      var tf=tr.querySelector('.tf'); if(!tf || tf.classList.contains('off')) return;
+      var open=tf.textContent.trim()==='▼';
+      if(open){ collapse(tr.dataset.i); tf.textContent='▶'; }
+      else { kids(tr.dataset.i).forEach(function(k){ k.classList.remove('hid'); }); tf.textContent='▼'; }
+    });
+  });
+})();
+</script>
+</body></html>
