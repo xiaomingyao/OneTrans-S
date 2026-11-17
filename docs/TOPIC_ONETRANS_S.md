@@ -63,7 +63,7 @@
 | 判据基准 | 判据（×1.05） | 我们档 A 752.0 的倍数 | 我们档 B 614.7 的倍数 | 需要的 MFU |
 |---|---:|---:|---:|---:|
 | 407 ms（未优化基线，fp32） | 427 ms | 1.85× | 1.51× | ≥35.1% |
-| **273 ms（+mixed precision，同精度档）** | **287 ms** | **2.75×** | 2.25× | **≥52.1%** |
+| **273 ms（+mixed precision，同精度档）** | **287 ms** | **2.75×** | 2.25× | **≥67.6%**（主口径；只算 Linear/mm 为 52.1%） |
 | 203 ms（+FlashAttention 单点最强） | 213 ms | 3.70× | 3.03× | ≥70.2% |
 
 **物理下界核对（不是估算，是硬约束）**：按当前 kernel 结构，vector 侧 240 ms 已贴 HBM 峰值、
@@ -146,7 +146,7 @@ python3 tools/probes/flops_pyramid_ratio.py   # pyramid 开/关的 FLOPs 比值
 | 量 | 论文 | 本仓实测（论文形状：d=256/h=4/ns=12/seq=1190/pyramid 6 段） | 判定 |
 |---|---|---|---|
 | 参数量 | 91 M | **90.44 M**（ffn=1536） | ✅ 差 −0.65%，在 ±5% 内 |
-| 每样本训练算力 | 2.64 TFLOPs（口径不明，见 §4.1） | **31.53 GFLOP/sample**（batch 2 实测，线性外推 batch 2048 = 64.6 TFLOP） | ❌ 差 **24.5×** |
+| 每样本训练算力 | 2.64 TFLOPs（口径不明，见 §4.1） | **40.91 GFLOP/sample**（Linear/mm 31.53 by `FlopCounterMode` + attention 9.38 因果口径；外推 batch 2048 = 83.8 TFLOP） | ❌ 差 **64.5×**（每样本）/ **31.7×**（每步） |
 | pyramid 开/关比值 | 8.08 / 2.64 = **3.06×** | **1.68×** | ❌ 结构不等价 |
 
 **参数面能对上不等于结构对上**：`Δ=0.6 M` 的「91 M」在网格里至少有三组解（ffn=1536/ns=12 → 90.4 M；ffn=512/ns=32 → 92.2 M；ffn=1024/ns=8/multi=2 → 92.2 M），单靠参数量**不可判定**；而算力比值 1.68× vs 3.06× 说明本仓 pyramid **只剪 query、不剪 K/V/FFN**（节省只来自注意力分数矩阵），论文的 3.06× 需要更彻底的剪枝。
@@ -216,3 +216,24 @@ MFU 分母 432 TF（单 die Cube bf16，32 核 × 1650 MHz）；分子 31.529 GF
 
 原始日志：`results/s_train_950_1die_8die.txt`。
 阶段状态：S2 **完成**（1 die + 8 die 跑通、四项数字齐全）；S3 部分完成（MFU + HBM 已有，AICore util 与 HCCL 占比待采）；S4 待出报告。
+
+
+### 4.1.1 2026-11-17 更新：我们的记账自己也漏了 attention（自纠）
+
+`tools/probes/probe_flopcounter_attn.py` 实测：`FlopCounterMode` **不数 attention** ——
+`F.scaled_dot_product_attention` 计数为 **0**、`torch_npu.npu_fusion_attention` 也为 **0**，只有 `nn.Linear`/`torch.mm` 被计数。
+
+⇒ 原分子 `31.529 GFLOP/sample` 只覆盖 Linear/mm，修正后：
+
+| 口径 | GFLOP/sample | 每卡每步 TFLOP | MFU（档 B 614.7 ms） | MFU（档 A 752.0 ms） | 287 ms 所需 MFU |
+|---|---:|---:|---:|---:|---:|
+| 下界（只算 Linear/mm，原记账） | 31.53 | 64.6 | 24.3% | 19.9% | 52.1% |
+| **主口径（+attention 因果半三角）** | **40.91** | **83.8** | **31.6%** | **25.8%** | **67.6%** |
+| 上界（+attention 全矩形） | 50.29 | 103.0 | 38.8% | 31.7% | 83.1% |
+
+attention 的每样本 FLOPs：fwd = 4·Σ(Lq·Lk)·d_total = **5.36 GFLOP**、bwd（2.5×）= **13.40 GFLOP**。
+**三档口径并列记录，报告主用"主口径"，其余两档注明用途（下界用于与论文 30.8% 这类口径不明的数字对比时更保守）。**
+
+**论文 2.64 TFLOPs 仍然对不上**：换成口径无关指标 —— 2.64T ÷ 1190 token ÷ 91 M 参数 = **24.4 FLOP/参数/token**，
+而标准 fwd+bwd 约 **6 FLOP/参数/token**（论文自己的 L 行也是 22.0）⇒ 论文的 TFLOPs 是其自有记账约定（≈标准的 3.7~4 倍），
+且 Table 2 与 Table 5 互相矛盾（8.62 T ÷ (989.4×0.308) = 28.3 ms/步，对 330 M×2048 样本不可能）⇒ **只能作为"论文自称"引用，不可当分母或对照**。

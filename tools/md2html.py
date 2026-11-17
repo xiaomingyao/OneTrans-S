@@ -74,6 +74,12 @@ def convert(md: str) -> str:
             t.append("</tbody></table>")
             out.append('<div class="tw">' + "".join(t) + "</div>")
             continue
+        if ln.strip().startswith("|"):
+            # 【修 2026-11-17】孤立表格行：表格被空行断成两截时，后半段没有表头/分隔行，
+            # 会走到段落分支而段落 while 又因行首 "|" 立即退出 ⇒ i 不前进，**死循环**（本仓 v5 报告踩过）。
+            out.append("<p>" + inline(ln.strip()) + "</p>")
+            i += 1
+            continue
         if re.match(r"^\s*[-*]\s+", ln):
             buf = []
             while i < len(lines):
@@ -110,6 +116,9 @@ def convert(md: str) -> str:
         buf = []
         while i < len(lines) and lines[i].strip() and not re.match(r"^(#{1,4}\s|\||```|\s*[-*]\s|\s*\d+\.\s)", lines[i]):
             buf.append(lines[i].strip())
+            i += 1
+        if not buf:            # 兜底：任何情况下都要前进，绝不允许死循环
+            buf.append(ln.strip())
             i += 1
         out.append("<p>" + inline(" ".join(buf)) + "</p>")
     return "\n".join(out)
