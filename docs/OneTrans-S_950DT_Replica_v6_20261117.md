@@ -176,6 +176,27 @@
 | 稀疏 embedding 表 | 不使用 | 本仓非序列特征走稠密 `nn.Linear` 投影，无表查找、无 gather、无表优化器 |
 | 跨请求 KV 缓存 | 不适用 | 训练任务无 request / 历史维度 |
 
+**NS tokenizer 的三种后端（新增，默认仍为 linear）**
+
+`ONETRANS_NS_BACKEND` 可选 `linear`（默认，连续特征走 `nn.Linear`）/ `ec`（torchrec `EmbeddingCollection`）/ `dynamic_emb`（RecSDK v2 `BatchedDynamicEmbeddingTablesV2`）；
+后两者把每个 NS 位置当成一张表（`ns_len` 张 × `ns_rows` 行 × `d_model`），输入改为 id。
+实现见 `OneTrans_NPU/ns_backend.py`，三者 forward 输出统一 `[B, ns_len, d_model]`。
+
+冒烟结果（d=64 / 4 heads / ffn=256 / seq=128 / ns=4 / batch=8 / pyramid=2 / ns_rows=20,000，3 步实测）：
+
+| 后端 | 表参数 | 是否进 `nn.Parameters` | 梯度形态 | 每步 |
+|---|---|---:|---|---:|
+| `linear`（默认） | 0 | — | 稠密 | 25.3–28.4 ms |
+| `ec` | 5.12 M | **是**（故 dense 梯度 5.12 M×4 B/步） | dense | 27.3–29.9 ms |
+| `dynamic_emb` | 5.12 M | 否（HKV 外部存储） | 无 dense 梯度（优化器融进反向） | 29.4–44.8 ms |
+
+三种后端 loss 均正常下降（3 步从 0.73/0.66 降到 0.04/0.17），说明前反向与优化器路径都通。
+大规模（12 表 × 100 万行 × 64 维、24,576 次查表/步）的专项对比见 `docs/ASSESS_EC_VS_DYNAMICEMB.md`：
+**dynamic_emb 10.62 ms vs 原始 EC 18.09 ms（快 1.70×），且省掉 2.9 GiB/步的 dense 梯度**。
+
+> 环境约束：`ec` / `dynamic_emb` 依赖 torchrec 1.2.0+npu 与 dynamic_emb v25.09，本机仅 RecSDK 环境（`/opt/buildtools/torch_v2_pt2.7.1`，torch 2.7.1）具备；
+> `linear` 路径同时可在主环境（torch 2.10.0）跑。两套环境不可混跑。
+
 ## 4 性能优化
 
 ### 4.1 与论文开箱性能对比

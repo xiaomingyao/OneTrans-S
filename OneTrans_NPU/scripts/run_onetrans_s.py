@@ -70,6 +70,10 @@ def parse_args() -> argparse.Namespace:
     # 数据（合成）
     p.add_argument("--seq-feat-dim", type=int, default=64)
     p.add_argument("--non-seq-dim", type=int, default=256)
+    p.add_argument("--ns-backend", choices=("linear", "ec", "dynamic_emb"), default="linear",
+                   help="非序列特征 tokenizer 后端：linear(默认,连续特征) / ec(torchrec EC) / dynamic_emb(RecSDK v2)")
+    p.add_argument("--ns-rows", type=int, default=0,
+                   help="ec / dynamic_emb 后端的表行数（表参数 = ns-len × ns-rows × d-model）")
     p.add_argument("--num-classes", type=int, default=2)
     # 训练
     p.add_argument("--device", default="npu" if hasattr(torch, "npu") else "cpu")
@@ -121,6 +125,9 @@ def build_model(args) -> nn.Module:
 
 def main() -> None:
     args = parse_args()
+    os.environ["ONETRANS_NS_BACKEND"] = args.ns_backend
+    if args.ns_rows:
+        os.environ["ONETRANS_NS_ROWS"] = str(args.ns_rows)
     torch.manual_seed(args.seed)
     device_type = npu_compat.init_device(args.device)
     rank, world_size, local_rank = npu_compat.init_distributed()
@@ -164,7 +171,14 @@ def main() -> None:
     # 一次生成 grad_accum 个 micro-batch 的数据，累积时按片取用
     n_local = args.batch_size * args.grad_accum
     gen = torch.Generator(device="cpu").manual_seed(args.seed + rank)
-    non_seq = torch.randn(n_local, args.non_seq_dim, generator=gen).to(args.device, dtype=in_dtype)
+    if args.ns_backend == "linear":
+        non_seq = torch.randn(n_local, args.non_seq_dim, generator=gen).to(args.device, dtype=in_dtype)
+    else:
+        if args.ns_rows <= 0:
+            raise SystemExit(f"--ns-backend {args.ns_backend} 需要 --ns-rows > 0（表行数）")
+        # 表后端吃 id：每个 NS 位置一个 id
+        non_seq = torch.randint(0, args.ns_rows, (n_local, args.ns_len),
+                                generator=gen).to(args.device)
     seq = torch.randn(n_local, args.seq_len, args.seq_feat_dim, generator=gen).to(args.device, dtype=in_dtype)
     labels = torch.randint(0, args.num_classes, (n_local,), generator=gen).to(args.device)
 

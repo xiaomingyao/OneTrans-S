@@ -71,7 +71,25 @@ class TAACOneTransClassifier(nn.Module):
         self.ns_len = ns_len
         self.seq_len = seq_len
         self.use_sep_token = use_sep_token
-        self.non_seq_tokenizer = nn.Linear(non_seq_dim, ns_len * d_model)
+        # NS tokenizer 支持三种后端（默认 linear，与论文的稠密投影一致）
+        #   ONETRANS_NS_BACKEND = linear | ec | dynamic_emb
+        #   ONETRANS_NS_ROWS    = 表行数（ec / dynamic_emb 必填）
+        if str(PROJECT_ROOT) not in sys.path:
+            sys.path.insert(0, str(PROJECT_ROOT))
+        from ns_backend import build_ns_tokenizer
+        self.ns_backend = _os.environ.get("ONETRANS_NS_BACKEND", "linear")
+        _ns_dev = None
+        if self.ns_backend not in ("linear", "dense", ""):
+            _dev_s = _os.environ.get("ONETRANS_NS_DEVICE", "")
+            if _dev_s:
+                _ns_dev = torch.device(_dev_s)
+            elif hasattr(torch, "npu") and torch.npu.is_available():
+                _ns_dev = torch.device("npu:0")
+            else:
+                _ns_dev = torch.device("cpu")
+        self.non_seq_tokenizer = build_ns_tokenizer(
+            self.ns_backend, non_seq_dim=non_seq_dim, ns_len=ns_len, d_model=d_model,
+            num_rows=int(_os.environ.get("ONETRANS_NS_ROWS", "0")), device=_ns_dev)
         self.seq_tokenizer = nn.Linear(seq_feature_dim, d_model)
         if use_sep_token:
             self.sep_token = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
@@ -117,7 +135,8 @@ class TAACOneTransClassifier(nn.Module):
         _mk = _os.environ.get("ONETRANS_PHASE_MARKERS", "0") == "1"
         batch_size = non_seq_x.size(0)
         with _RF("P_embed") if _mk else _null():
-            ns_tokens = self.non_seq_tokenizer(non_seq_x).view(batch_size, self.ns_len, -1)
+            _t = self.non_seq_tokenizer(non_seq_x)      # linear: [B,ns,d]；表后端: 同样 [B,ns,d]
+            ns_tokens = _t.view(batch_size, self.ns_len, -1)
         with _RF("P_embed") if _mk else _null():
             seq_tokens = self.seq_tokenizer(seq_x)
         if self.use_sep_token:
