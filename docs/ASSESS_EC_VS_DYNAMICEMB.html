@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>torchrec.EC vs RecSDK v2 DynamicEmbedding：昇腾实测</title>
+<style>
+body{font-family:"Microsoft YaHei","PingFang SC",-apple-system,Segoe UI,sans-serif;max-width:1180px;margin:0 auto;
+padding:32px 28px 60px;color:#1f2328;line-height:1.65;font-size:15px;background:#fff}
+h1{font-size:26px;color:#C00000;border-bottom:3px solid #C00000;padding-bottom:10px;margin:6px 0 18px}
+h2{font-size:20px;color:#C00000;border-left:5px solid #C00000;padding-left:10px;margin:34px 0 12px}
+h3{font-size:16.5px;color:#8B0000;margin:22px 0 8px}
+p{margin:9px 0}
+ul,ol{margin:8px 0 8px 22px;padding:0}li{margin:4px 0}
+.tw{overflow-x:auto;margin:12px 0 16px}
+table{border-collapse:collapse;width:100%;font-size:13.5px}
+th{background:#fbeaea;color:#8B0000;font-weight:600;text-align:left;padding:7px 9px;border:1px solid #e3c9c9}
+td{padding:6px 9px;border:1px solid #e3c9c9;vertical-align:top}
+tbody tr:nth-child(even){background:#fcf8f8}
+code{background:#f4f5f7;border-radius:3px;padding:1px 4px;font-family:Consolas,Menlo,monospace;font-size:12.8px;color:#a03030}
+pre{background:#f7f7f9;border:1px solid #e5e5ea;border-left:4px solid #C00000;border-radius:4px;padding:11px 13px;overflow-x:auto}
+pre code{background:none;color:#24292f;padding:0;font-size:12.6px;line-height:1.5}
+blockquote{margin:10px 0;padding:8px 14px;background:#fdf6f6;border-left:4px solid #d98b8b;color:#5b4b4b}
+hr{border:none;border-top:1px solid #eee;margin:22px 0}
+.meta{color:#666;font-size:13px}
+
+table.tree{width:100%;border-collapse:collapse;font-size:13px;margin:10px 0}
+table.tree th{background:#111827;color:#fff;font-weight:600;padding:7px 9px;text-align:left;white-space:nowrap}
+table.tree td{padding:6px 9px;border-bottom:1px solid #e5e7eb;vertical-align:top;line-height:1.55}
+table.tree tr.lv1{background:#eef2f7;font-weight:700}
+table.tree tr.lv2{background:#fff;font-weight:600}
+table.tree tr.lv3{background:#fcfdff}
+table.tree tr.tv{cursor:pointer}
+table.tree tr.tv:hover{background:#e8f2ff}
+table.tree tr.hid{display:none}
+table.tree .tf{display:inline-block;width:1.15em;color:#2563eb;font-size:10px;vertical-align:1px}
+table.tree .tf.off{visibility:hidden}
+</style></head><body>
+<h1>torchrec.EC vs RecSDK v2 DynamicEmbedding：昇腾实测对比</h1>
+<p>&gt; 环境：950DT（1 die）· <code>/opt/buildtools/torch_v2_pt2.7.1</code>（torch 2.7.1+cpu / torch_npu 2.7.1）· <strong>torchrec 1.2.0+npu</strong> · <strong>dynamic_emb v25.09</strong> &gt; 探针：<code>tools/probes/bench_ec_vs_dynamicemb.py</code>（双臂）、<code>bench_dynamicemb_min.py</code>（B 臂最小可测）、<code>diag_dynamicemb.py</code>（诊断） &gt; 形状：12 张表 × 1,000,000 行 × 64 维（表数据 2.9 GiB f32），每步 12 × 2048 = <strong>24,576 次查表</strong>（≈本模型 NS token 规模）</p>
+<h2>0 结果</h2>
+<div class="tw"><table><thead><tr><th>臂</th><th>每步</th><th>吞吐</th><th>梯度形态</th><th>优化器</th></tr></thead><tbody><tr><td><strong>A <code>torchrec.EmbeddingCollection</code>（原始 EC）</strong></td><td><strong>18.09 ms</strong></td><td>1.36 Mlookup/s</td><td><strong>dense</strong>：12 张表全量物化 = <strong>2,930 MiB/步</strong></td><td><code>torch.optim.Adagrad</code>（dense 梯度）</td></tr><tr><td><strong>B <code>BatchedDynamicEmbeddingTablesV2</code>（HKV 动态表，<code>use_index_dedup=True</code>）</strong></td><td><strong>10.62 ms</strong></td><td><strong>2.32 Mlookup/s</strong></td><td>无 dense 梯度（优化器融进反向）</td><td><code>EXACT_ROWWISE_ADAGRAD</code></td></tr><tr><td>B′ 同上但 <code>use_index_dedup=False</code></td><td>1,463.85 ms</td><td>0.02 Mlookup/s</td><td>同上</td><td>同上</td></tr></tbody></table></div>
+<p><strong>结论</strong>：同一形状下 <strong>dynamic_emb 比原始 EC 快 1.70×</strong>（18.09 / 10.62）， 而且<strong>省掉 2.9 GiB/步的 dense 梯度</strong>——后者在 16 卡 data-parallel 下还要额外 all-reduce 2.9 GiB/步。 B′ 的 100× 退化需复核（疑似非 dedup 路径在本版本退化），<strong>不作为结论引用</strong>。</p>
+<h2>1 A 臂细节（torchrec.EC）</h2>
+<pre><code>cfg = [EmbeddingConfig(num_embeddings=1_000_000, embedding_dim=64, name=f&quot;t{i}&quot;) for i in range(12)]
+ec = EmbeddingCollection(tables=cfg, device=torch.device(&quot;npu:0&quot;))
+kjt = KeyedJaggedTensor(keys=[...12...], values=idx.reshape(-1), lengths=full((12,), 2048))
+ec(kjt) → backward → torch.optim.Adagrad</code></pre>
+<ul><li>输出是 <code>KeyedTensor</code>，其元素为 <code>JaggedTensor</code>（取 <code>.values()</code> 才是 dense 张量）；</li><li><strong>梯度是 dense 的</strong>：<code>is_sparse={False}</code>，12 张表的 <code>grad</code> 合计 <strong>2,930 MiB</strong>（= 全表大小）；</li><li>单步 18.09 ms 里，绝大多数是与「表大小」成正比的梯度物化，而不是 24,576 次查表本身。</li></ul>
+<h2>2 B 臂细节（dynamic_emb / HKV）</h2>
+<pre><code>opt = DynamicEmbTableOptions(training=True, init_capacity=1_000_000, max_capacity=1_000_000,
+        dim=64, embedding_dtype=torch.float32, index_type=torch.int64,
+        bucket_capacity=128, block_size=128, io_block_size=1024,
+        global_hbm_for_values=1_000_000*64*4, local_hbm_for_values=1_000_000*64*4)
+mod = BatchedDynamicEmbeddingTablesV2(table_options=opt_lists, table_names=[...12...],
+        feature_table_map=list(range(12)), pooling_mode=DynamicEmbPoolingMode.NONE,
+        device=torch.device(&quot;npu:0&quot;), use_index_dedup=True,
+        optimizer=EmbOptimType.EXACT_ROWWISE_ADAGRAD, learning_rate=0.1)
+mod(indices_flat, offsets)        # 优化器已在反向内完成，无需 optimizer.step()</code></pre>
+<p>用法要点（踩过的坑）：</p>
+<ol><li><code>DynamicEmbTableOptions</code> 的 <strong><code>dim</code> / <code>max_capacity</code> 必须显式给</strong>，否则传给 C++ 的是 <code>None</code>（<code>TypeError: incompatible constructor arguments</code>）；</li><li><code>output_dtype</code> <strong>不是</strong> <code>DynamicEmbTableOptions</code> 的字段（是模块参数），传进 options 会 <code>TypeError</code>；</li><li>HKV 的表内存<strong>不计入</strong> <code>torch_npu.npu.max_memory_allocated</code>（分配在 torch 分配器之外），显存要按 <code>全局容量 × dim × 4 B</code> 自己算；</li><li>同一进程内多次构建大表后，<code>_update_score()</code> 里会报 <code>aclrtSynchronizeStream failed</code> ⇒ 逐配置独立进程更稳（与 perf 探针的既有纪律一致）。</li></ol>
+<h2>3 对本仓的意义</h2>
+<ol><li>本仓 OneTrans-S 复刻<strong>不用任何表后端</strong>（非序列特征走稠密 <code>nn.Linear</code>），所以这个对比用于回答「如果按论文形态接表，该选哪条」；</li><li>若要接表：<strong>dynamic_emb 明显优于原始 EC</strong>（快 1.7×、无 dense 梯度），且它支持 rowwise Adagrad / SGD / Adam 等稀疏优化器；</li><li>但<strong>跨卡稀疏梯度同步仍是鸿沟</strong>（<code>c10d::allreduce_</code> 在 NPU 不支持），dynamic_emb 需要走它自己的分片 + planner 路径，不能直接套 DDP。</li></ol>
+<h2>4 复现</h2>
+<pre><code># 双臂（A 会写 dense 梯度 2.9 GiB，注意显存）
+/opt/buildtools/torch_v2_pt2.7.1/bin/python3 tools/probes/bench_ec_vs_dynamicemb.py
+# B 臂最小可测（推荐，数字最稳）
+/opt/buildtools/torch_v2_pt2.7.1/bin/python3 tools/probes/bench_dynamicemb_min.py</code></pre>
+<script>
+(function(){
+  var tables=[].slice.call(document.querySelectorAll('table.tree'));
+  tables.forEach(function(t){
+    var rows=[].slice.call(t.querySelectorAll('tbody tr'));
+    rows.forEach(function(r){ if(+r.dataset.lv>1) r.classList.add('hid'); });
+    function kids(i){ return rows.filter(function(x){ return x.dataset.p===String(i); }); }
+    function collapse(i){
+      kids(i).forEach(function(k){
+        k.classList.add('hid');
+        var tf=k.querySelector('.tf'); if(tf) tf.textContent='▶';
+        collapse(k.dataset.i);
+      });
+    }
+    t.addEventListener('click', function(e){
+      var tr=e.target.closest('tr.tv'); if(!tr) return;
+      var tf=tr.querySelector('.tf'); if(!tf || tf.classList.contains('off')) return;
+      var open=tf.textContent.trim()==='▼';
+      if(open){ collapse(tr.dataset.i); tf.textContent='▶'; }
+      else { kids(tr.dataset.i).forEach(function(k){ k.classList.remove('hid'); }); tf.textContent='▼'; }
+    });
+  });
+})();
+</script>
+</body></html>
