@@ -82,14 +82,33 @@ class TAACOneTransClassifier(nn.Module):
         if self.ns_backend not in ("linear", "dense", ""):
             _dev_s = _os.environ.get("ONETRANS_NS_DEVICE", "")
             if _dev_s:
-                _ns_dev = torch.device(_dev_s)
+                _d = torch.device(_dev_s)
+                # HKV 的 C++ 侧用 int(str(device)[-1]) 取片号，"npu" 会取到 'u' ⇒ 必须带索引
+                if _d.type == "npu" and _d.index is None:
+                    _d = torch.device(f"npu:{torch.npu.current_device()}")
+                _ns_dev = _d
             elif hasattr(torch, "npu") and torch.npu.is_available():
                 _ns_dev = torch.device(f"npu:{torch.npu.current_device()}")
             else:
                 _ns_dev = torch.device("cpu")
-        self.non_seq_tokenizer = build_ns_tokenizer(
-            self.ns_backend, non_seq_dim=non_seq_dim, ns_len=ns_len, d_model=d_model,
-            num_rows=int(_os.environ.get("ONETRANS_NS_ROWS", "0")), device=_ns_dev)
+        # ONETRANS_NS_SHAPE = direct（直接把连续特征投影）| paper（论文形态：分桶 id → 查表 → concat → 单次 MLP → split）
+        self.ns_shape = _os.environ.get("ONETRANS_NS_SHAPE", "direct")
+        _rows = int(_os.environ.get("ONETRANS_NS_ROWS", "0"))
+        if self.ns_shape == "paper":
+            from paper_input import PaperNSTokenizer
+            _f = int(_os.environ.get("ONETRANS_NS_FEATURES", str(ns_len)))
+            _edim = int(_os.environ.get("ONETRANS_NS_EDIM", "32"))
+            if _rows <= 0:
+                raise ValueError("paper 形态需要 ONETRANS_NS_ROWS（每域分桶数/表行数）")
+            self.n_non_seq_features = _f
+            self.non_seq_tokenizer = PaperNSTokenizer(
+                self.ns_backend, [_rows] * _f, _edim, ns_len, d_model,
+                num_rows_default=_rows, device=_ns_dev)
+        else:
+            self.n_non_seq_features = 0
+            self.non_seq_tokenizer = build_ns_tokenizer(
+                self.ns_backend, non_seq_dim=non_seq_dim, ns_len=ns_len, d_model=d_model,
+                num_rows=_rows, device=_ns_dev)
         self.seq_tokenizer = nn.Linear(seq_feature_dim, d_model)
         if use_sep_token:
             self.sep_token = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)

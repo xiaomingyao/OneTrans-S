@@ -74,6 +74,12 @@ def parse_args() -> argparse.Namespace:
                    help="非序列特征 tokenizer 后端：linear(默认,连续特征) / ec(torchrec EC) / dynamic_emb(RecSDK v2)")
     p.add_argument("--ns-rows", type=int, default=0,
                    help="ec / dynamic_emb 后端的表行数（表参数 = ns-len × ns-rows × d-model）")
+    p.add_argument("--ns-shape", choices=("direct", "paper"), default="direct",
+                   help="direct=连续特征直接投影(本仓默认)；paper=论文形态(数值分桶/类别 id → 查表 → concat → 单次 MLP → split)")
+    p.add_argument("--ns-features", type=int, default=0,
+                   help="paper 形态的特征域个数 F（默认=ns-len）")
+    p.add_argument("--ns-edim", type=int, default=32,
+                   help="paper 形态每域 embedding 维度（concat 后 F×edim 进 MLP）")
     p.add_argument("--num-classes", type=int, default=2)
     # 训练
     p.add_argument("--device", default="npu" if hasattr(torch, "npu") else "cpu")
@@ -135,6 +141,10 @@ def main() -> None:
         args.device = f"{device_type}:{local_rank}"
     # 表后端（ec / dynamic_emb）必须在**本 rank 的 die** 上建表，否则 gather 跨设备报错
     os.environ["ONETRANS_NS_DEVICE"] = str(args.device)
+    os.environ["ONETRANS_NS_SHAPE"] = args.ns_shape
+    if args.ns_features:
+        os.environ["ONETRANS_NS_FEATURES"] = str(args.ns_features)
+    os.environ["ONETRANS_NS_EDIM"] = str(args.ns_edim)
     is_main = rank == 0
     log = print if is_main else (lambda *a, **k: None)
 
@@ -173,7 +183,13 @@ def main() -> None:
     # 一次生成 grad_accum 个 micro-batch 的数据，累积时按片取用
     n_local = args.batch_size * args.grad_accum
     gen = torch.Generator(device="cpu").manual_seed(args.seed + rank)
-    if args.ns_backend == "linear":
+    if args.ns_shape == "paper":
+        # 论文形态：连续原始值 → bucketize 成 id（每域 ns_rows 个桶）；类别特征等价于直接给 id
+        from paper_input import Bucketizer
+        _f = args.ns_features or args.ns_len
+        _raw = torch.randn(n_local, _f, generator=gen).to(args.device)
+        non_seq = Bucketizer(_f, args.ns_rows, device=args.device)(_raw).to(torch.int64)
+    elif args.ns_backend == "linear":
         non_seq = torch.randn(n_local, args.non_seq_dim, generator=gen).to(args.device, dtype=in_dtype)
     else:
         if args.ns_rows <= 0:
