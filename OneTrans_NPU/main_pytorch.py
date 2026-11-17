@@ -2,6 +2,7 @@ import math
 import os
 
 import torch
+from torch.autograd.profiler import record_function
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
@@ -23,6 +24,8 @@ _CAT_INPLACE = os.environ.get("ONETRANS_CAT_INPLACE", "0") == "1"
 # [O1] 显式 bf16 模式：关掉 autocast 后，NS 路径的 fp32 bias 会把输出提升成 fp32（与 SDPA 的 bf16 k/v 冲突），
 # 该模式下 NS bias 一起落 bf16、RMSNorm 输出与残差流也落 bf16。默认关 ⇒ 既有路径逐位不变。
 _EXPLICIT_BF16 = os.environ.get("ONETRANS_EXPLICIT_BF16", "0") == "1"
+# 阶段级 profiling 标记（默认关）：打开后 block 内 attn/ffn、以及训练循环里的 fwd/loss/bwd/opt 各打一个 record_function
+_PHASE_MARK = os.environ.get("ONETRANS_PHASE_MARKERS", "0") == "1"
 
 
 def _nsbias(b):
@@ -433,6 +436,12 @@ class OneTransBlock(nn.Module):
         return res[0] if len(res) == 1 else torch.cat(res, dim=1)
 
     def _attn_part(self, x: torch.Tensor) -> torch.Tensor:
+        if _PHASE_MARK:
+            with record_function("P_attn"):
+                return self._attn_part_impl(x)
+        return self._attn_part_impl(x)
+
+    def _attn_part_impl(self, x: torch.Tensor) -> torch.Tensor:
         x = self.rms_0(x)
         k_x, q_x, v_x = x, x, x
         if self.pyramid_stack_len is not None and self.pyramid_stack_len >= self.ns_len:
@@ -442,6 +451,12 @@ class OneTransBlock(nn.Module):
         return origin_x + x
 
     def _ffn_part(self, x: torch.Tensor) -> torch.Tensor:
+        if _PHASE_MARK:
+            with record_function("P_ffn"):
+                return self._ffn_part_impl(x)
+        return self._ffn_part_impl(x)
+
+    def _ffn_part_impl(self, x: torch.Tensor) -> torch.Tensor:
         origin_x = x
         x = self.rms_1(x)
         x = self.cal_mix_param_ffn(x)

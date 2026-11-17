@@ -3,7 +3,20 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import os as _os
+
 import torch
+from torch.autograd.profiler import record_function as _RF
+
+
+class _null:  # 空上下文
+    def __enter__(self):
+        return None
+
+    def __exit__(self, *a):
+        return False
+
+
 from torch import nn
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -101,16 +114,21 @@ class TAACOneTransClassifier(nn.Module):
         )
 
     def forward(self, non_seq_x: torch.Tensor, seq_x: torch.Tensor) -> torch.Tensor:
+        _mk = _os.environ.get("ONETRANS_PHASE_MARKERS", "0") == "1"
         batch_size = non_seq_x.size(0)
-        ns_tokens = self.non_seq_tokenizer(non_seq_x).view(batch_size, self.ns_len, -1)
-        seq_tokens = self.seq_tokenizer(seq_x)
+        with _RF("P_embed") if _mk else _null():
+            ns_tokens = self.non_seq_tokenizer(non_seq_x).view(batch_size, self.ns_len, -1)
+        with _RF("P_embed") if _mk else _null():
+            seq_tokens = self.seq_tokenizer(seq_x)
         if self.use_sep_token:
             sep_token = self.sep_token.expand(batch_size, -1, -1)
             x = torch.cat([seq_tokens, sep_token, ns_tokens], dim=1)
         else:
             x = torch.cat([seq_tokens, ns_tokens], dim=1)
-        x = self.base_block(x)
-        for block in self.stack_blocks:
-            x = block(x)
-        pooled = x.mean(dim=1)
-        return self.head(pooled)
+        with _RF("P_blocks") if _mk else _null():
+            x = self.base_block(x)
+            for block in self.stack_blocks:
+                x = block(x)
+        with _RF("P_pool_head") if _mk else _null():
+            pooled = x.mean(dim=1)
+            return self.head(pooled)

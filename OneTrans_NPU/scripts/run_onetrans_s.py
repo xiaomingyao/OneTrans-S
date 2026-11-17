@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+
+from torch.autograd.profiler import record_function
 import json
 import os
 import statistics
@@ -134,6 +136,7 @@ def main() -> None:
         args.amp = False                      # 不再让 autocast 插手
         args.input_dtype = "bf16"
         os.environ.setdefault("ONETRANS_WEIGHT_SHADOW", "1")   # 权重用每步一次的 bf16 影子，图仍接在 fp32 参数上
+    phase_mark = os.environ.get("ONETRANS_PHASE_MARKERS", "0") == "1"
     use_amp = npu_compat.should_enable_amp(device_type, args.amp, args.amp_dtype)
     # 输入按训练精度落地（bf16 时省一半输入显存：4096 batch 下 1190×64 token 张量 1.25 GiB → 0.62 GiB）
     in_dtype = (torch.bfloat16 if ((args.input_dtype == "bf16" and use_amp and args.amp_dtype == "bf16") or explicit_bf16)
@@ -203,22 +206,26 @@ def main() -> None:
             lo, hi = k * args.batch_size, (k + 1) * args.batch_size
             _nogr = torch.no_grad() if args.no_backward else contextlib.nullcontext()
             with _nogr, npu_compat.autocast_context(device_type=device_type, amp_dtype=amp_dtype, use_amp=use_amp):
-                logits = model(non_seq[lo:hi], seq[lo:hi])
-                if explicit_bf16:
-                    logits = logits.float()          # 只有这一步回到 fp32，一共 1 次/step
-                loss = crit(logits, labels[lo:hi]) / args.grad_accum
-                loss_item = loss.item() * args.grad_accum
+                with record_function("P_fwd") if phase_mark else contextlib.nullcontext():
+                    logits = model(non_seq[lo:hi], seq[lo:hi])
+                    if explicit_bf16:
+                        logits = logits.float()      # 只有这一步回到 fp32，一共 1 次/step
+                with record_function("P_loss") if phase_mark else contextlib.nullcontext():
+                    loss = crit(logits, labels[lo:hi]) / args.grad_accum
+                    loss_item = loss.item() * args.grad_accum
             if not args.no_backward:
-                if scaler.is_enabled():
-                    scaler.scale(loss).backward()
-                else:
-                    loss.backward()
+                with record_function("P_bwd") if phase_mark else contextlib.nullcontext():
+                    if scaler.is_enabled():
+                        scaler.scale(loss).backward()
+                    else:
+                        loss.backward()
         if not args.no_backward:
-            if scaler.is_enabled():
-                scaler.step(opt)
-                scaler.update()
-            else:
-                opt.step()
+            with record_function("P_opt") if phase_mark else contextlib.nullcontext():
+                if scaler.is_enabled():
+                    scaler.step(opt)
+                    scaler.update()
+                else:
+                    opt.step()
         main_pytorch.clear_weight_shadow_cache()   # 权重已更新 / 前向图已用完 ⇒ 下一步重新 cast
         if device_type == "npu":
             torch.npu.synchronize()

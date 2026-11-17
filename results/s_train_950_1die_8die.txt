@@ -346,3 +346,18 @@ torch.OutOfMemoryError: NPU out of memory. Tried to allocate 2.34 GiB (NPU 0; 91
 # tile sweep(BH512): 128x64 → 3.12x/2.66x; 64x64 → 3.82x/2.91x; 64x128 → 3.08x/2.32x; 128x128 失败
 # 自纠: 首版 n_start 方向写反(跳过的是"允许的前段列") ⇒ 假的"快29~51%"; 修正后为慢 2.3~3.1x
 # 结论: 自写 attention 否决(前向已慢2.3-3.1x, 反向还要写3个kernel, 厂商bwd 65.8ms/步)
+
+## TOP-DOWN 分解 (当前最优配置 G1+G2+G3+O1, 16die, 档B, batch2048/卡/步, 3 稳态步)
+# step_trace_time 均值: Stage 614.27 | Computing 605.47(98.6%) | Comm 19.47(暴露4.67/掩盖14.80) | Free 4.13(0.7%)
+# 差分(全步 vs --no-backward): 前向 164.2 | 反向+opt+comm 471.9 (2.87x)
+# 家族: GEMM 176.1(27.7%) | FA反向+附属 139.7(22.0%) | Add 57.7 | SiLU 56.5 | 搬运 46.3 | FA前向+附属 47.4
+#       RMSNorm 40.1 | ReduceSum 20.8 | AllReduce 19.5 | Zero 14.0 | 其他 13.9 | Cast 4.1  (=636.1)
+# 前向内部: GEMM 58.9 | FA 47.5 | SiLU 22.5 | RMSNorm 15.6 | Add 12.4 | 搬运 5.5 | Cat+Cast 3.4
+# 反向内部: FA 139.7 | GEMM 117.2 | Add 45.3 | 搬运 40.8 | SiluBwd 34.0 | RmsNormGrad 24.5 | ReduceSum 20.8 | Comm 19.5 | Zero 14.0
+# 利用率(各自FLOP): FAfwd 193.8 TF/s 44.8% | FAbwd 151.3 35.0% | GEMM 92.6 21.4% | cube合计 126.6 29.3%
+#                   整步记账口径 64.57 TFLOP/614.3ms = 105.1 TF/s = MFU 24.33%
+# 气泡并集法: kernel 并集 610.1 ms vs 墙钟 614.3 ⇒ 4.2 ms (0.7%)
+# GEMM 细分: Mm 108.6 x152 (714us/次) | Addmm 53.6 x78 (688us) | Matmul 5.2 x24 | BatchMatMul 3.83 x210 (18us/次, NS 12行)
+# 次数大户: Zero 580 | Cast 569 | Add 479 | ViewCopy 250 | Transpose 241 | TensorMove 236 | BatchMatMul 210 | Muls 162 | ReduceSum 158
+# 方法纠错: record_function 标记 + 区间包含法归属 kernel 是错的(P_loss 算出 337ms), 因 CPU 标记是入队窗口;
+#           改用差分法(全步 - --no-backward)才可信
