@@ -13,7 +13,8 @@
 
 | 文档 | 内容 |
 |---|---|
-| [`docs/OneTrans-S_950DT_Optimization_v3_20261117.md`](docs/OneTrans-S_950DT_Optimization_v3_20261117.md) | **总报告 v3（当前）**：双档主表、**六步有效优化 + 11 项无效留档**、16 die profile 画像、与 H100 并列、未闭合项、复现命令 |
+| [`docs/OneTrans-S_950DT_Optimization_v4_20261117.md`](docs/OneTrans-S_950DT_Optimization_v4_20261117.md) | **总报告 v4（当前）**：双档主表（614.7 / 752.0 ms）、**七步有效优化 + 16 项无效留档**、**TOP-DOWN 四层分阶段诊断**、利用率（FA 反向 35% / GEMM 64.3% / cube 50.9%）、剩余空间三档、与 H100 并列、未闭合项 |
+| [`docs/OneTrans-S_950DT_Optimization_v3_20261117.md`](docs/OneTrans-S_950DT_Optimization_v3_20261117.md) | 总报告 v3（历史）：六步有效 + 11 项无效留档，档 B 730.0 ms 那一版 |
 | [`docs/OPT_ROUND1_RESULTS.md`](docs/OPT_ROUND1_RESULTS.md) | Round1 逐项实验记录（E1a/E1b/E4/E5/E7/E9/E10/E11，含无效项留档与归因更正） |
 | [`docs/PLAN_OPT_ROUND1.md`](docs/PLAN_OPT_ROUND1.md) | 实验方案与验收门槛（单变量、同节点同档 A/B、≥1% 且大于极差、精度门禁先过） |
 | [`docs/PROFILE_16DIE_BOTTLENECK.md`](docs/PROFILE_16DIE_BOTTLENECK.md) | 16 卡 profile 全景与 4 条瓶颈（含 B3 低估 6 倍的更正） |
