@@ -234,3 +234,79 @@ ReduceSum 20.6（158）｜ Transpose 13.3 ｜ FA 附属转置 14.8 ｜ Slice 5.4
 
 ⇒ **cube 侧在当前栈上已无便宜的杠杆**。剩余空间只在这三类里：① 图模式专项（定位算子内部旁路 stream）；
 ② AscendC 自写 attention/融合算子（工程量大）；③ 结构性减算力（更激进 pyramid / K-V 剪枝，**与论文冲突**）。
+
+
+## 8. 图模式排查（2026-11-17，结论：两条路都要改代码，且上限只有 ~0.8% 的 launch 收益）
+
+### 8.1 手动 `torch.npu.graph` 捕获 —— attention 算子全部不可捕获
+
+`tools/probes/probe_graph_op_bisect.py`（每个算子单独一个进程，避免失败后上下文损坏）：
+同一进程、同一机器、同一 CANN 下，**非 attention 算子全 OK，attention 全 FAIL**。
+
+| 算子 | capture 结果 |
+|---|---|
+| `F.linear` bf16 | **OK** |
+| `npu_rms_norm`（融合） | **OK** |
+| 手写 rmsnorm（cast 链） | **OK** |
+| `npu_add_rms_norm`（融合） | **OK** |
+| `silu` / `mean→fp32` / `zeros(分配)` | **OK** |
+| `SDPA is_causal`（q==k） | **FAIL** `capture_end ... 107025` |
+| `SDPA 显式掩码`（q≠k） | **FAIL** 同码 |
+| `npu_fusion_attention` BSH 前向（带掩码） | **FAIL** 同码 |
+| `npu_fusion_attention` 前向+反向 | **FAIL** 同码 |
+
+`tools/probes/probe_graph_capture_modes.py` 把 `torch.npu.graph` 的另两个参数也试了：
+
+| capture 参数 | 结果 |
+|---|---|
+| 默认 | `107025` |
+| `auto_dispatch_capture=True` | `captures_underway.empty() INTERNAL ASSERT FAILED`（NPUCachingAllocator.cpp:2933） |
+| `capture_error_mode="thread_local"` | 同上 assert |
+| 两者同开 | 同上 assert |
+
+⇒ **旁路 stream 在 attention 算子的 kernel 实现内部**（不是我们的代码、不是 DDP/HCCL），
+本版本的 `torch.npu.graph` 无法把 `aclnnFlashAttentionScore*` 的旁路流 join 回来；
+换 capture 模式只会撞到 allocator 的内部 assert。这条路线要通，只能不用融合 attention 算子。
+
+### 8.2 TorchAir (`torch.compile(backend="npu")`) —— 编译期就失败，但**错在我们自己的写法**
+
+`tools/probes/probe_torchair_bisect.py`（B64、静态 shape、粒度二分）：
+
+| 粒度 | 结果 |
+|---|---|
+| `CausalMaskAttention` | **FAIL** — Dynamo: `failed to run FX node with fake tensors: getitem(FakeTensor(size=(1203,256)), (slice(None), slice(244, None)))` |
+| `OneTransBlock` | **FAIL** — `EZ9999`，GE `[InferShape] The k-axis of a(1191) and b(256) must be the same` |
+| `MultiOneTransBlock` | **FAIL** — 同上 |
+| 整模 | **FAIL** — 同上 |
+
+`1191 = 1203 − 12`，说明 GE 侧把「去掉 NS 12 行后的序列维」当成了某个 matmul 的 k 轴。
+根因指向我们为 G2/G3 写的写法对图编译器不友好：`out[:, seq_len:, :] = torch.bmm(...).permute(1,0,2)`（原地写 + permute + 切片混合），
+Dynamo 在 `x[:, seq_len:, :]` 的 fake-tensor getitem 上就失败。
+⇒ 这条路**不是平台打不开**，而是需要把投影/掩码写法改成 trace 友好（eager 下等价、图下可推形状）的版本。
+
+### 8.3 收益上限：先量气泡，再决定值不值得改
+
+O1 配置、单 die、batch 1024、profile 2 个稳态步：
+
+| 项 | 数值 |
+|---|---|
+| 稳态步时（墙钟） | **306.3 ms** |
+| kernel 时长总和（2 步） | **607.7 ms** ⇒ 每步 **303.9 ms** |
+| **气泡** | **≈2.4 ms / 步 = 0.8%** |
+
+⇒ 图模式**单靠消 launch 开销最多只能拿 0.8%**；它的真正价值在 GE 融合（`Add/Silu/RmsNorm/Transpose`
+这类小算子每步合计仍有 ~100 ms 级）。但要拿到融合，得先过 8.2 那道编译关。
+
+**O1 后的 kernel 构成（单 die，2 步合计，注意与 §7 的 16 die 数据不同口径）**：
+FA 反向 131.6（14 次）｜Mm 108.6（152）｜Add 56.5（398）｜Addmm 53.6（78）｜FA 前向 41.0（14）｜
+SiluBwd 34.0（54）｜TensorMove 25.2（192）｜RmsNormGrad 24.3（28）｜Silu 22.6（54）｜ReduceSum 20.8（158）｜
+RmsNorm 15.6（28）｜Zero 13.8（580）｜Transpose 12.4（276）+ FA 附属 8.4+6.4。
+（`Cast` 已跌出前 15 ⇒ autocast 的 cast 链确实被 O1 消灭了。）
+
+### 8.4 结论
+
+| 路线 | 状态 | 需要的动作 | 上限 |
+|---|---|---|---|
+| 手动 `torch.npu.graph` + 融合 attention | **死**（算子不可捕获） | 换成非融合 attention（性能反而倒退） | — |
+| TorchAir `torch.compile(backend="npu")` | **卡在编译期** | 把投影/掩码改成 trace 友好写法（开发任务） | 0.8%（launch）+ GE 融合的未知增量 |
+| eager（现状） | 可用 | 继续做小算子级优化 | — |

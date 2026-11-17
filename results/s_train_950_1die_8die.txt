@@ -328,3 +328,13 @@ torch.OutOfMemoryError: NPU out of memory. Tried to allocate 2.34 GiB (NPU 0; 91
 # mask bool→uint8: fwd 2.996, f+b 14.764 ⇒ 无差别
 # FA 效率: (B1024 H4 480x1203 D64) fwd+bwd ≈1.06 TFLOP / 14.77ms = 71.8 TF/s = 432TF 的 16.6%
 # 结论: cube 侧无 API 旋钮; 只剩 图模式(旁路stream)/AscendC自写/结构减算力(与论文冲突)
+
+## 图模式排查（2026-11-17, 1 die）
+# 手动 capture: linear/rms_norm/add_rms_norm/silu/mean/zeros 全 OK; SDPA(is_causal/显式掩码)/FA(fwd/fwd+bwd) 全 FAIL 107025
+#   auto_dispatch_capture / capture_error_mode=thread_local ⇒ captures_underway.empty() assert (NPUCachingAllocator.cpp:2933)
+# TorchAir compile(backend=npu): attn Dynamo fake-tensor getitem 失败; block/stack/整模 GE InferShape k轴1191 vs 256 (=1203-12)
+# 气泡测量(O1, 单die b1024, 2 稳态步): 墙钟 306.3ms/步, kernel 合计 607.7ms/2步=303.9/步 ⇒ 气泡 ~2.4ms = 0.8%
+# O1 后 kernel 构成(2步合计): FAbwd 131.6/14 | Mm 108.6/152 | Add 56.5/398 | Addmm 53.6/78 | FAfwd 41.0/14
+#   SiluBwd 34.0/54 | TensorMove 25.2/192 | RmsNormGrad 24.3/28 | Silu 22.6/54 | ReduceSum 20.8/158
+#   RmsNorm 15.6/28 | Zero 13.8/580 | Transpose 12.4/276 | FA附属 8.4+6.4   (Cast 已跌出前15)
+# 结论: 图模式 launch 收益上限仅 0.8%; TorchAir 需先把投影/掩码改成 trace 友好写法
