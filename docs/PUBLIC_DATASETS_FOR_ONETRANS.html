@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>业界公开数据集调研（面向 OneTrans-S 复刻）</title>
+<style>
+body{font-family:"Microsoft YaHei","PingFang SC",-apple-system,Segoe UI,sans-serif;max-width:1180px;margin:0 auto;
+padding:32px 28px 60px;color:#1f2328;line-height:1.65;font-size:15px;background:#fff}
+h1{font-size:26px;color:#C00000;border-bottom:3px solid #C00000;padding-bottom:10px;margin:6px 0 18px}
+h2{font-size:20px;color:#C00000;border-left:5px solid #C00000;padding-left:10px;margin:34px 0 12px}
+h3{font-size:16.5px;color:#8B0000;margin:22px 0 8px}
+p{margin:9px 0}
+ul,ol{margin:8px 0 8px 22px;padding:0}li{margin:4px 0}
+.tw{overflow-x:auto;margin:12px 0 16px}
+table{border-collapse:collapse;width:100%;font-size:13.5px}
+th{background:#fbeaea;color:#8B0000;font-weight:600;text-align:left;padding:7px 9px;border:1px solid #e3c9c9}
+td{padding:6px 9px;border:1px solid #e3c9c9;vertical-align:top}
+tbody tr:nth-child(even){background:#fcf8f8}
+code{background:#f4f5f7;border-radius:3px;padding:1px 4px;font-family:Consolas,Menlo,monospace;font-size:12.8px;color:#a03030}
+pre{background:#f7f7f9;border:1px solid #e5e5ea;border-left:4px solid #C00000;border-radius:4px;padding:11px 13px;overflow-x:auto}
+pre code{background:none;color:#24292f;padding:0;font-size:12.6px;line-height:1.5}
+blockquote{margin:10px 0;padding:8px 14px;background:#fdf6f6;border-left:4px solid #d98b8b;color:#5b4b4b}
+hr{border:none;border-top:1px solid #eee;margin:22px 0}
+.meta{color:#666;font-size:13px}
+
+table.tree{width:100%;border-collapse:collapse;font-size:13px;margin:10px 0}
+table.tree th{background:#111827;color:#fff;font-weight:600;padding:7px 9px;text-align:left;white-space:nowrap}
+table.tree td{padding:6px 9px;border-bottom:1px solid #e5e7eb;vertical-align:top;line-height:1.55}
+table.tree tr.lv1{background:#eef2f7;font-weight:700}
+table.tree tr.lv2{background:#fff;font-weight:600}
+table.tree tr.lv3{background:#fcfdff}
+table.tree tr.tv{cursor:pointer}
+table.tree tr.tv:hover{background:#e8f2ff}
+table.tree tr.hid{display:none}
+table.tree .tf{display:inline-block;width:1.15em;color:#2563eb;font-size:10px;vertical-align:1px}
+table.tree .tf.off{visibility:hidden}
+</style></head><body>
+<h1>业界公开数据集调研（面向 OneTrans-S 复刻）</h1>
+<p>&gt; 目的：本仓当前用<strong>合成 token</strong>（<code>--source synth</code>）只测性能、无法收敛；本文件回答「用哪个公开数据集能把 OneTrans-S 真训起来」。 &gt; 检索时间 2026-11-17；标注 ✅ 为本次核验、⚠️ 为常见口径未逐条核验。</p>
+<h2>0 结论：推荐顺序</h2>
+<div class="tw"><table><thead><tr><th>排序</th><th>数据集</th><th>用途</th><th>理由</th></tr></thead><tbody><tr><td><strong>1</strong></td><td><strong>TAAC2026 官方 sample</strong>（HF <code>TAAC2026/data_sample_1000</code>，1,000 行 / 120 列）</td><td>打通数据链路、对齐上游</td><td><strong>唯一与上游 <code>utils/taac_data.py</code> 的 schema 完全一致</strong>，代码零改动；但只有 1,000 行，只能跑通不能收敛</td></tr><tr><td><strong>2</strong></td><td><strong>Ali-CCP</strong>（阿里点击-转化预测，约 42 M 训练 + 42 M 评估）</td><td><strong>真实训练首选</strong></td><td>唯一同时具备 <strong>CTR + CVR 双标签</strong>、用户行为序列、数值+类别特征的工业级公开集；与论文「双任务 + 多行为序列」形态最接近</td></tr><tr><td><strong>3</strong></td><td><strong>Taobao Ad Display/Click</strong>（约 2,656 万条曝光，114 万用户，8 天）</td><td>次选真实训练</td><td>特征齐全（用户画像 / 广告 / 100 M+ 行为日志），社区预处理脚本多；规模比 Ali-CCP 小</td></tr><tr><td>4</td><td><strong>TAAC2025 TencentGR-10M / 1M</strong>（HF，CC-BY-4.0）</td><td>公开可直取的规模数据</td><td>合法性/许可最干净、HF 直下；但它是<strong>生成式召回的候选集格式</strong>（item_id + retrieval_id + 15 列特征 dict），<strong>没有多行为长序列、没有 CTR/CVR 标签</strong></td></tr><tr><td>5</td><td><strong>Tenrec / KuaiRand / MicroLens</strong></td><td>序列建模能力对比</td><td>多行为长序列齐全（MicroLens ~10 亿交互、KuaiRand 3.2 亿、Tenrec 4 场景），但<strong>无工业 CTR 标签</strong>，需自造标签与负采样</td></tr><tr><td>6</td><td><strong>Amazon Reviews 2023</strong>（约 5.71 亿条评论）</td><td>超长用户序列</td><td>序列最丰富、可截断到 1190；<strong>无曝光/点击标签</strong>，只能做「下一物品」或自造 CTR</td></tr><tr><td>7</td><td><strong>Criteo 1TB</strong>（约 40 亿行）</td><td>压 NS 侧与表容量极限</td><td>无序列，纯数值+类别特征；适合单独压 HKV/NS 输入侧，不适合 OneTrans 整体</td></tr></tbody></table></div>
+<h2>1 对比表</h2>
+<div class="tw"><table><thead><tr><th>数据集</th><th>规模</th><th>多行为序列</th><th>NS 特征</th><th>标签</th><th>许可</th><th>获取难度</th><th>与 OneTrans-S 匹配度</th><th>主要缺口</th></tr></thead><tbody><tr><td><strong>TAAC2026 sample</strong></td><td>1,000 行 × 120 列 ✅</td><td>有（list 型特征列）</td><td>有（<code>user_int_feats_*</code> / <code>item_int_feats_*</code>）</td><td><code>label_type</code>（多任务）✅</td><td>比赛数据</td><td>HF 公开（完整集需比赛资格）</td><td>★★★★★ 结构</td><td>样本太少</td></tr><tr><td><strong>Ali-CCP</strong></td><td>~42 M + 42 M ✅</td><td>有（用户行为序列特征）</td><td>有（稠密 + 类别）</td><td>CTR + CVR ✅</td><td>CC-BY-SA-NC 4.0</td><td>天池需申请</td><td>★★★★☆</td><td>序列较短（需 pad 到 1190）</td></tr><tr><td><strong>Taobao Ad Display</strong></td><td>26.56 M ⚠️（114 万用户 / 8 天 ✅）</td><td>有（<code>behavior_log</code> 1 亿+ ⚠️）</td><td>有（user_profile / ad_feature）</td><td>CTR</td><td>CC-BY-SA-NC 4.0</td><td>天池需申请</td><td>★★★★☆</td><td>无 CVR 标签</td></tr><tr><td><strong>TencentGR-10M</strong></td><td>3.64 M 训练 + 3.64 M 候选 ✅</td><td>无</td><td>有（15 列特征 dict）✅</td><td>生成式召回（非 CTR）</td><td>CC-BY-4.0 ✅</td><td>HF 直下 ✅</td><td>★★☆☆☆</td><td>无序列、无 CTR 标签</td></tr><tr><td><strong>Tenrec</strong></td><td>4 场景、亿级 ⚠️</td><td>有（点击/点赞/收藏等多行为）</td><td>有限</td><td>多行为隐式反馈</td><td>学术许可</td><td>官网/HF</td><td>★★★☆☆</td><td>无 CTR/CVR 曝光标签</td></tr><tr><td><strong>MicroLens</strong></td><td>~10 亿交互 / 3,400 万用户 / 100 万视频 ⚠️</td><td>有（含视频/文本多模态）</td><td>内容特征为主</td><td>隐式反馈</td><td>学术许可</td><td>官网申请</td><td>★★☆☆☆</td><td>无 CTR；模态重心不同</td></tr><tr><td><strong>KuaiRand</strong></td><td>3.23 亿交互 ⚠️</td><td>有（多行为 + 随机曝光，无偏）</td><td>视频统计特征 40+ 列</td><td>隐式 + 多行为</td><td>学术许可</td><td>HF / 官网</td><td>★★★☆☆</td><td>无 CTR/CVR</td></tr><tr><td><strong>Amazon Reviews 2023</strong></td><td>5.71 亿评论 ⚠️</td><td>有（超长用户历史）</td><td>商品元数据丰富</td><td>评分/评论（非曝光点击）</td><td>学术许可</td><td>HF 直下</td><td>★★☆☆☆</td><td>需自造 CTR 标签</td></tr><tr><td><strong>Criteo 1TB</strong></td><td>~40 亿行 ✅</td><td>无</td><td>13 数值 + 26 类别</td><td>CTR ✅</td><td>Criteo 许可</td><td>官方分片下载（~1 TB）</td><td>★★☆☆☆</td><td>无序列</td></tr></tbody></table></div>
+<h2>2 规模 × 训练配置的量化（16 die、全局 batch 32,768、实测 692 ms/步）</h2>
+<div class="tw"><table><thead><tr><th>数据集</th><th>样本数</th><th>每 epoch 步数</th><th>每 epoch 时间</th><th>说明</th></tr></thead><tbody><tr><td>TAAC2026 sample</td><td>1,000</td><td>0.03</td><td>—</td><td>只能调试</td></tr><tr><td>TencentGR-10M</td><td>3.64 M</td><td>111</td><td>~77 s</td><td>太小，只够验证</td></tr><tr><td>Taobao Ad Display</td><td>26.56 M</td><td>810</td><td>~9.3 min</td><td>可跑 3–5 epoch</td></tr><tr><td><strong>Ali-CCP</strong></td><td>42 M</td><td>1,282</td><td><strong>~14.8 min</strong></td><td>可跑 5–10 epoch，<strong>推荐</strong></td></tr><tr><td>Amazon 2023</td><td>571 M</td><td>17,425</td><td>~3.3 h</td><td>需先抽子集</td></tr></tbody></table></div>
+<p>表容量对照（HKV，e_dim=32 / 256 两种）：</p>
+<div class="tw"><table><thead><tr><th>场景</th><th>item 数</th><th>e_dim=32</th><th>e_dim=256</th></tr></thead><tbody><tr><td>论文口径（数据集 10.2 M item）</td><td>10.2 M</td><td>1.3 GB/die</td><td><strong>10.4 GB/die</strong>（超出 pure-HBM 舒适区，需 hybrid）</td></tr><tr><td>Ali-CCP 实际 item</td><td>~数千万 ⚠️</td><td>数 GB</td><td>数十 GB/die ⇒ 必须 hybrid 或行分片</td></tr></tbody></table></div>
+<h2>3 落地步骤（接入真实数据要做的事）</h2>
+<ol><li><strong>数据获取</strong>：Ali-CCP / Taobao 走天池申请（需实名），TAAC2026 sample / TencentGR / Amazon 走 HF 直下。</li><li><strong>schema 对齐</strong>：本仓 <code>OneTrans_NPU</code> 只有合成数据路径；上游 <code>GPU_Reference/utils/taac_data.py</code> 是 TAAC2026 专用加载器 —— 接 Ali-CCP 需新写字段映射（用户/物品/上下文 → <code>user_int_feats_*</code> 等价物）。</li><li><strong>序列对齐</strong>：论文 seq 1190（多层行为融合 + [SEP]）→ Ali-CCP/Taobao 原始序列远短于此，需 pad + mask 或改用「短序列 + 金字塔 schedule 自适应」。</li><li><strong>NS 特征对齐</strong>：数值特征走 <code>Bucketizer</code>（已实现），类别特征直接给 id（已实现），F=12 域需按数据集实际域数改。</li><li><strong>先 1 die 跑通再 16 die</strong>：1 die 用 1,024 桶级小表验证 loss 能降（本仓已验证：0.7446 → 0.0000），再放 16 die。</li></ol>
+<h2>4 诚实标注：未核验项</h2>
+<ul><li>Taobao 26.56 M 行数、<code>behavior_log</code> 1 亿+、Tenrec / KuaiRand / MicroLens / Amazon 的规模数字，均为公开资料常见口径，<strong>本次未逐条核验</strong>（天池页面需登录，部分站点未开放抓取）。</li><li><strong>TAAC2026 完整数据集未公开</strong>：HF <code>TAAC2026</code> 组织下只有 <code>data_sample_1000</code> 与 <code>second_round_sample_1000</code> 两个 1,000 行样例（HF API 实测），完整集需比赛资格。</li><li>Ali-CCP 的序列特征长度、类别特征基数未核验，接数据前需实际统计。</li></ul>
+<script>
+(function(){
+  var tables=[].slice.call(document.querySelectorAll('table.tree'));
+  tables.forEach(function(t){
+    var rows=[].slice.call(t.querySelectorAll('tbody tr'));
+    rows.forEach(function(r){ if(+r.dataset.lv>1) r.classList.add('hid'); });
+    function kids(i){ return rows.filter(function(x){ return x.dataset.p===String(i); }); }
+    function collapse(i){
+      kids(i).forEach(function(k){
+        k.classList.add('hid');
+        var tf=k.querySelector('.tf'); if(tf) tf.textContent='▶';
+        collapse(k.dataset.i);
+      });
+    }
+    t.addEventListener('click', function(e){
+      var tr=e.target.closest('tr.tv'); if(!tr) return;
+      var tf=tr.querySelector('.tf'); if(!tf || tf.classList.contains('off')) return;
+      var open=tf.textContent.trim()==='▼';
+      if(open){ collapse(tr.dataset.i); tf.textContent='▶'; }
+      else { kids(tr.dataset.i).forEach(function(k){ k.classList.remove('hid'); }); tf.textContent='▼'; }
+    });
+  });
+})();
+</script>
+</body></html>
