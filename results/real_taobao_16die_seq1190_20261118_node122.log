@@ -1,0 +1,95 @@
+W1118 11:31:35.554000 2653557 torch/distributed/run.py:766] 
+W1118 11:31:35.554000 2653557 torch/distributed/run.py:766] *****************************************
+W1118 11:31:35.554000 2653557 torch/distributed/run.py:766] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W1118 11:31:35.554000 2653557 torch/distributed/run.py:766] *****************************************
+[W1118 11:31:43.437427566 ProcessGroupHCCL.cpp:1145] Warning: The watchdog timeout 600000ms(which is set by init_process_group) is less than or equal to HCCL execution timeout 1836000ms! The plog may not be recorded. (function ProcessGroupHCCL)
+[data] taobao rows=2,600,000 steps/epoch=79 ns_card=[1141730, 97, 13, 3, 7, 4, 4, 2, 5, 846812, 12961, 423437, 255875, 461498, 2, 2, 438] seq_card=[12977, 461527, 5] ctr=0.0515
+[mode] explicit_bf16=1 weight_shadow=1
+[env] {'device_type': 'npu', 'torch': '2.7.1+cpu', 'torch_npu': '2.7.1.post4', 'soc': 'Ascend950DT_9582'} dist=world_size=16 rank=0 local_rank=0
+[shape] d=256 heads=4 ffn=1536 blocks=7 (multi=1) seq=1190 ns=12 sep=True total=1203
+[shape] pyramid_schedule=[1203, 960, 736, 480, 256, 12]
+[shape] params=91,919,894 (91.92 M)
+[run] amp=False input_dtype=torch.bfloat16 dtype=bf16 mask=paper_causal attn_mask_env=bool weight_shadow=True per_card_micro_batch=1024 grad_accum=2 per_card_batch=2048 global_batch=32768 ckpt_act=False
+[rank0]:[W1118 11:31:47.739678108 TensorFactories.cpp:340] Warning: Cannot create tensor with interal format while allow_internel_format=False, tensor will be created with base format. (function operator())
+[rank6]:[W1118 11:31:47.940385207 TensorFactories.cpp:340] Warning: Cannot create tensor with interal format while allow_internel_format=False, tensor will be created with base format. (function operator())
+[rank1]:[W1118 11:31:47.221829716 TensorFactories.cpp:340] Warning: Cannot create tensor with interal format while allow_internel_format=False, tensor will be created with base format. (function operator())
+[rank4]:[W1118 11:31:47.282983631 TensorFactories.cpp:340] Warning: Cannot create tensor with interal format while allow_internel_format=False, tensor will be created with base format. (function operator())
+[rank7]:[W1118 11:31:47.293260868 TensorFactories.cpp:340] Warning: Cannot create tensor with interal format while allow_internel_format=False, tensor will be created with base format. (function operator())
+[rank5]:[W1118 11:31:47.317229003 TensorFactories.cpp:340] Warning: Cannot create tensor with interal format while allow_internel_format=False, tensor will be created with base format. (function operator())
+[rank2]:[W1118 11:31:47.376675822 TensorFactories.cpp:340] Warning: Cannot create tensor with interal format while allow_internel_format=False, tensor will be created with base format. (function operator())
+[rank3]:[W1118 11:31:47.451094418 TensorFactories.cpp:340] Warning: Cannot create tensor with interal format while allow_internel_format=False, tensor will be created with base format. (function operator())
+[rank6]:[W1118 11:31:53.732101490 reducer.cpp:1430] Warning: find_unused_parameters=True was specified in DDP constructor, but did not find any unused parameters in the forward pass. This flag results in an extra traversal of the autograd graph every iteration,  which can adversely affect performance. If your model indeed never has any unused parameters in the forward pass, consider turning this flag off. Note that this warning may be a false positive if your model has flow control causing later iterations to have unused parameters. (function operator())
+[rank1]:[W1118 11:31:53.733223891 reducer.cpp:1430] Warning: find_unused_parameters=True was specified in DDP constructor, but did not find any unused parameters in the forward pass. This flag results in an extra traversal of the autograd graph every iteration,  which can adversely affect performance. If your model indeed never has any unused parameters in the forward pass, consider turning this flag off. Note that this warning may be a false positive if your model has flow control causing later iterations to have unused parameters. (function operator())
+[rank7]:[W1118 11:31:53.742159549 reducer.cpp:1430] Warning: find_unused_parameters=True was specified in DDP constructor, but did not find any unused parameters in the forward pass. This flag results in an extra traversal of the autograd graph every iteration,  which can adversely affect performance. If your model indeed never has any unused parameters in the forward pass, consider turning this flag off. Note that this warning may be a false positive if your model has flow control causing later iterations to have unused parameters. (function operator())
+[rank2]:[W1118 11:31:53.745373152 reducer.cpp:1430] Warning: find_unused_parameters=True was specified in DDP constructor, but did not find any unused parameters in the forward pass. This flag results in an extra traversal of the autograd graph every iteration,  which can adversely affect performance. If your model indeed never has any unused parameters in the forward pass, consider turning this flag off. Note that this warning may be a false positive if your model has flow control causing later iterations to have unused parameters. (function operator())
+[rank0]:[W1118 11:31:53.746837421 reducer.cpp:1430] Warning: find_unused_parameters=True was specified in DDP constructor, but did not find any unused parameters in the forward pass. This flag results in an extra traversal of the autograd graph every iteration,  which can adversely affect performance. If your model indeed never has any unused parameters in the forward pass, consider turning this flag off. Note that this warning may be a false positive if your model has flow control causing later iterations to have unused parameters. (function operator())
+[rank3]:[W1118 11:31:53.749031943 reducer.cpp:1430] Warning: find_unused_parameters=True was specified in DDP constructor, but did not find any unused parameters in the forward pass. This flag results in an extra traversal of the autograd graph every iteration,  which can adversely affect performance. If your model indeed never has any unused parameters in the forward pass, consider turning this flag off. Note that this warning may be a false positive if your model has flow control causing later iterations to have unused parameters. (function operator())
+[rank4]:[W1118 11:31:53.766227183 reducer.cpp:1430] Warning: find_unused_parameters=True was specified in DDP constructor, but did not find any unused parameters in the forward pass. This flag results in an extra traversal of the autograd graph every iteration,  which can adversely affect performance. If your model indeed never has any unused parameters in the forward pass, consider turning this flag off. Note that this warning may be a false positive if your model has flow control causing later iterations to have unused parameters. (function operator())
+[rank5]:[W1118 11:31:53.788168276 reducer.cpp:1430] Warning: find_unused_parameters=True was specified in DDP constructor, but did not find any unused parameters in the forward pass. This flag results in an extra traversal of the autograd graph every iteration,  which can adversely affect performance. If your model indeed never has any unused parameters in the forward pass, consider turning this flag off. Note that this warning may be a false positive if your model has flow control causing later iterations to have unused parameters. (function operator())
+[step 000] warm ms=  1554.7 loss=0.63269
+[step 001] warm ms=   726.2 loss=0.18771
+[step 002] warm ms=   717.6 loss=1.94973
+[step 003] warm ms=   718.0 loss=7.50256
+[step 004] warm ms=   717.8 loss=9.23697
+[step 005] meas ms=   722.4 loss=0.62586
+[step 006] meas ms=   714.7 loss=0.23581
+[step 007] meas ms=   716.1 loss=0.21902
+[step 008] meas ms=   718.0 loss=0.24645
+[step 009] meas ms=   716.9 loss=0.18039
+[step 010] meas ms=   716.5 loss=0.22060
+[step 011] meas ms=   715.5 loss=0.20366
+[step 012] meas ms=   717.2 loss=0.23372
+[step 013] meas ms=   714.7 loss=0.15831
+[step 014] meas ms=   718.2 loss=0.23340
+[step 015] meas ms=   716.3 loss=0.22047
+[step 016] meas ms=   718.6 loss=0.19845
+[step 017] meas ms=   721.2 loss=0.20087
+[step 018] meas ms=   712.0 loss=0.24427
+[step 019] meas ms=   763.1 loss=0.20111
+[step 020] meas ms=   714.7 loss=0.22957
+[step 021] meas ms=   715.6 loss=0.21023
+[step 022] meas ms=   714.4 loss=0.22847
+[step 023] meas ms=   715.8 loss=0.23420
+[step 024] meas ms=   713.8 loss=0.18983
+[step 025] meas ms=   716.5 loss=0.24184
+[step 026] meas ms=   717.2 loss=0.17758
+[step 027] meas ms=   713.2 loss=0.18030
+[step 028] meas ms=   713.2 loss=0.18600
+[step 029] meas ms=   714.1 loss=0.21766
+[step 030] meas ms=   713.4 loss=0.17728
+[step 031] meas ms=   715.4 loss=0.21492
+[step 032] meas ms=   716.6 loss=0.20967
+[step 033] meas ms=   715.7 loss=0.18347
+[step 034] meas ms=   716.8 loss=0.20595
+[step 035] meas ms=   716.1 loss=0.20536
+[step 036] meas ms=   715.3 loss=0.18930
+[step 037] meas ms=   715.8 loss=0.23192
+[step 038] meas ms=   714.8 loss=0.21507
+[step 039] meas ms=   716.2 loss=0.16269
+[step 040] meas ms=   714.4 loss=0.19512
+[step 041] meas ms=   714.3 loss=0.20954
+[step 042] meas ms=   717.0 loss=0.21335
+[step 043] meas ms=   714.2 loss=0.20519
+[step 044] meas ms=   714.5 loss=0.16809
+[step 045] meas ms=   717.2 loss=0.21605
+[step 046] meas ms=   714.1 loss=0.19169
+[step 047] meas ms=   713.2 loss=0.18934
+[step 048] meas ms=   714.1 loss=0.20593
+[step 049] meas ms=   715.2 loss=0.19983
+[step 050] meas ms=   715.1 loss=0.17557
+[step 051] meas ms=   716.9 loss=0.18676
+[step 052] meas ms=   713.2 loss=0.18329
+[step 053] meas ms=   713.3 loss=0.23522
+[step 054] meas ms=   715.2 loss=0.19814
+[step 055] meas ms=   718.5 loss=0.20344
+[step 056] meas ms=   713.3 loss=0.20664
+[step 057] meas ms=   713.9 loss=0.18402
+[step 058] meas ms=   711.4 loss=0.22051
+[step 059] meas ms=   711.3 loss=0.23487
+[step 060] meas ms=   711.5 loss=0.19455
+[step 061] meas ms=   713.4 loss=0.19816
+[step 062] meas ms=   713.8 loss=0.23164
+[step 063] meas ms=   711.4 loss=0.20414
+[step 064] meas ms=   711.4 loss=0.18779
+[perf] steady_median_step_ms=715.1 mean=716.0 n=60 global_samples_per_s=45821.9 per_card_samples_per_s=2863.9
+[perf] hbm_peak_alloc_gb=58.77 flops_per_sample=0.000 GFLOP gflops_per_step(global)=0.0 mfu_vs_432TF=nan%
