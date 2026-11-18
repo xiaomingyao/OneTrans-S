@@ -1,0 +1,38 @@
+{
+  "real_data_seq50_16die": {
+    "log": "real_taobao_16die_20261118_node122.log",
+    "seq_len": 50,
+    "per_die_batch": 2048,
+    "global_batch": 32768,
+    "world_size": 16,
+    "steps_measured": 60,
+    "steady_median_step_ms": 123.5,
+    "mean_step_ms": 124.3,
+    "min_step_ms": 121.2,
+    "max_step_ms": 139.1,
+    "global_samples_per_s": 265307.1,
+    "per_card_samples_per_s": 16581.7,
+    "hbm_peak_alloc_gb": 5.87,
+    "params": 91919894,
+    "loss_last10_mean": 0.206,
+    "mfu": "未采（未传 --flops-per-sample）"
+  },
+  "real_data_seq1190_16die": {
+    "log": "real_taobao_16die_seq1190_20261118_node122.log",
+    "seq_len": 1190,
+    "per_die_batch": 2048,
+    "global_batch": 32768,
+    "world_size": 16,
+    "steps_measured": 60,
+    "steady_median_step_ms": 715.1,
+    "mean_step_ms": 716.0,
+    "min_step_ms": 711.3,
+    "max_step_ms": 763.1,
+    "global_samples_per_s": 45821.9,
+    "per_card_samples_per_s": 2863.9,
+    "hbm_peak_alloc_gb": 58.77,
+    "params": 91919894,
+    "loss_last10_mean": 0.207,
+    "mfu": "未采（未传 --flops-per-sample）"
+  }
+}
