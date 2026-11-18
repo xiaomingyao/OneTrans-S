@@ -104,9 +104,13 @@ class TAACOneTransClassifier(nn.Module):
             _edim = int(_os.environ.get("ONETRANS_NS_EDIM", "32"))
             if _rows <= 0:
                 raise ValueError("paper 形态需要 ONETRANS_NS_ROWS（每域分桶数/表行数）")
+            # ONETRANS_NS_CARD：逗号分隔的**逐域**基数（真实数据集各域基数不同）
+            _card_env = _os.environ.get("ONETRANS_NS_CARD", "")
+            _card = [int(x) for x in _card_env.split(",") if x.strip()] if _card_env else [_rows] * _f
+            _f = len(_card)
             self.n_non_seq_features = _f
             self.non_seq_tokenizer = PaperNSTokenizer(
-                self.ns_backend, [_rows] * _f, _edim, ns_len, d_model,
+                self.ns_backend, _card, _edim, ns_len, d_model,
                 num_rows_default=_rows, device=_ns_dev)
         else:
             self.n_non_seq_features = 0
@@ -115,7 +119,17 @@ class TAACOneTransClassifier(nn.Module):
                 num_rows=_rows, device=_ns_dev)
         # 序列侧：ONETRANS_SEQ_ID=1 时走论文形态（item ID 查表 + side info 拼接 → 共享 MLP）
         self.seq_uses_ids = _os.environ.get("ONETRANS_SEQ_ID", "0") == "1"
-        if self.seq_uses_ids:
+        _seq_fields = _os.environ.get("ONETRANS_SEQ_FIELDS", "")
+        self.seq_multi_field = bool(_seq_fields)
+        if _seq_fields:
+            # 多字段序列（item + 侧信息 id 各查表）：ONETRANS_SEQ_FIELDS=cate_rows,brand_rows,btag_rows
+            from paper_input import SeqMultiFieldTokenizer
+            _cards = [int(x) for x in _seq_fields.split(",") if x.strip()]
+            _edim = int(_os.environ.get("ONETRANS_SEQ_EDIM", "32"))
+            self.seq_tokenizer = SeqMultiFieldTokenizer(
+                _os.environ.get("ONETRANS_NS_BACKEND", "linear"), _cards, _edim,
+                d_model, device=_ns_device())
+        elif self.seq_uses_ids:
             from paper_input import SeqIdTokenizer
             _rows = int(_os.environ.get("ONETRANS_SEQ_ROWS", "0"))
             _edim = int(_os.environ.get("ONETRANS_SEQ_EDIM", "32"))
@@ -182,7 +196,7 @@ class TAACOneTransClassifier(nn.Module):
             _t = _t.to(_dt)
             ns_tokens = _t.view(batch_size, self.ns_len, -1)
         with _RF("P_embed") if _mk else _null():
-            if self.seq_uses_ids:
+            if self.seq_uses_ids or self.seq_multi_field:
                 if seq_ids is None:
                     raise ValueError("ONETRANS_SEQ_ID=1 需要传入 seq_ids")
                 seq_tokens = self.seq_tokenizer(seq_ids, seq_x)   # (item ids, side info)

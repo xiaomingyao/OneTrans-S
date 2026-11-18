@@ -83,6 +83,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seq-id-rows", type=int, default=0,
                    help="序列侧 item 表行数；>0 时序列走论文形态（item ID 查表 + side info → 共享 MLP）")
     p.add_argument("--seq-edim", type=int, default=32, help="序列侧 item embedding 维度")
+    p.add_argument("--source", choices=("synth", "taobao"), default="synth",
+                   help="synth=合成 token（只测性能）；taobao=真实 TaobaoAd_x1 数据（需 --data-dir）")
+    p.add_argument("--data-dir", default="", help="TaobaoAd_x1 预处理目录（tools/prep_taobao_ad.py 产出）")
     p.add_argument("--fresh-ids", action="store_true",
                    help="每个 step 重新采样 id（完整训练口径；关闭时所有步复用同一批，只测性能）")
     p.add_argument("--task", choices=("random", "parity", "threshold"), default="random",
@@ -183,6 +186,27 @@ def main() -> None:
     amp_dtype = torch.bfloat16 if args.amp_dtype == "bf16" else torch.float16
     scaler = npu_compat.build_scaler(device_type, use_amp, amp_dtype)
 
+    # ---- 真实数据源（TaobaoAd_x1）：须在 build_model 前把词表/形态写进 env ----
+    src = None
+    if args.source == "taobao":
+        if not args.data_dir:
+            raise SystemExit("--source taobao 需要 --data-dir")
+        from taobao_ad_data import TaobaoAdSource
+        src = TaobaoAdSource(args.data_dir, seq_len=args.seq_len, rank=rank, world_size=world_size,
+                            global_batch=args.batch_size * args.grad_accum * world_size,
+                            device=args.device)
+        os.environ["ONETRANS_NS_SHAPE"] = "paper"
+        os.environ["ONETRANS_NS_CARD"] = ",".join(str(c) for c in src.ns_cardinalities)
+        os.environ["ONETRANS_NS_FEATURES"] = str(len(src.ns_cardinalities))
+        os.environ["ONETRANS_NS_ROWS"] = str(max(src.ns_cardinalities))
+        os.environ["ONETRANS_SEQ_FIELDS"] = ",".join(str(c) for c in src.seq_cardinalities)
+        os.environ["ONETRANS_SEQ_ID"] = "0"
+        args.ns_shape = "paper"
+        if rank == 0:
+            print(f"[data] taobao rows={len(src):,} steps/epoch={src.steps_per_epoch}"
+                  f" ns_card={src.ns_cardinalities} seq_card={src.seq_cardinalities}"
+                  f" ctr={src.meta['ctr']:.4f}", flush=True)
+
     model = build_model(args).to(args.device)
     n_params = sum(p.numel() for p in model.parameters())
     total_tokens = args.ns_len + args.seq_len + (1 if args.use_sep_token else 0)
@@ -203,7 +227,10 @@ def main() -> None:
     # 一次生成 grad_accum 个 micro-batch 的数据，累积时按片取用
     n_local = args.batch_size * args.grad_accum
     gen = torch.Generator(device="cpu").manual_seed(args.seed + rank)
-    if args.ns_shape == "paper":
+    if src is not None:
+        # 真实数据：每步在循环里从 mmap 取（这里只占位，避免多余分配）
+        non_seq = seq = labels = seq_ids = None
+    elif args.ns_shape == "paper":
         # 论文形态：连续原始值 → bucketize 成 id（每域 ns_rows 个桶）；类别特征等价于直接给 id
         from paper_input import Bucketizer
         _f = args.ns_features or args.ns_len
@@ -258,6 +285,9 @@ def main() -> None:
         log(f"[prof] rank0 profile_dir={args.profile_dir} active_steps={args.profile_steps}")
 
     for i in range(args.warmup + args.steps):
+        if src is not None:
+            _b = src.batch(i)
+            non_seq, seq, seq_ids, labels = _b["ns"], _b["seq_x"], _b["seq_ids"], _b["label"]
         if args.fresh_ids:
             # 完整训练口径：每步换一批 id（在 device 上采样，避免 H2D 干扰）
             non_seq = torch.randint(0, args.ns_rows, non_seq.shape, device=args.device, dtype=torch.int64)

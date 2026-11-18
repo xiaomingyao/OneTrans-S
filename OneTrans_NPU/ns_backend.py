@@ -166,7 +166,9 @@ class DynamicEmbTableLookup(nn.Module):
                     "sgd": EmbOptimType.EXACT_SGD}.get(optimizer, EmbOptimType.EXACT_ROWWISE_ADAGRAD)
         opts = []
         for c in cardinalities:
-            c = int(c)
+            # HKV 硬约束：init_capacity 必须 ≥ bucket_capacity(128)，否则建表报
+            # "num_of_buckets_per_alloc must be equal or less than initial required buckets number"
+            c = max(int(c), 1024)
             opts.append(DynamicEmbTableOptions(
                 training=True, init_capacity=c, max_capacity=c, dim=e_dim,
                 embedding_dtype=torch.float32, index_type=torch.int64,

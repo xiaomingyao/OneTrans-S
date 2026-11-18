@@ -77,3 +77,28 @@ class SeqIdTokenizer(nn.Module):
         emb = emb.reshape(b, l, self.e_dim)
         cat = torch.cat([emb, side], dim=-1)                                  # [B, L, e+side]
         return self.proj(cat)
+
+class SeqMultiFieldTokenizer(nn.Module):
+    """论文形态序列 tokenizer，多字段版本：
+    item ID + 侧信息（如 cate / brand / btag）各自查表 → 拼接 → 共享投影 MLP → d_model。
+
+    与 SeqIdTokenizer 的差别：侧信息也是**类别 id**（走表），不是连续向量。
+    输入 ids: [B, L, F]（F 个字段）；输出 [B, L, d_model]。
+    """
+
+    expects_ids = True
+
+    def __init__(self, lookup_kind: str, field_cardinalities: list[int], e_dim: int,
+                 d_model: int, device=None):
+        super().__init__()
+        self.fields = len(field_cardinalities)
+        self.e_dim = e_dim
+        self.tables = build_table_lookup(lookup_kind, cardinalities=field_cardinalities,
+                                         e_dim=e_dim, device=device)
+        self.proj = nn.Linear(self.fields * e_dim, d_model)
+
+    def forward(self, ids: torch.Tensor, side: torch.Tensor | None = None) -> torch.Tensor:
+        b, l, f = ids.shape
+        emb = self.tables(ids.reshape(-1, f))            # [B*L, F, e_dim]
+        emb = emb.reshape(b, l, f * self.e_dim)
+        return self.proj(emb)
