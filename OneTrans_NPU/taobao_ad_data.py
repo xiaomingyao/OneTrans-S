@@ -57,6 +57,10 @@ class TaobaoAdSource:
 
     @property
     def seq_cardinalities(self) -> list[int]:
+        # 预处理若已把基数写进 meta 就直接用（全量 .max() 要扫 3×12 GB，16 rank 各扫一遍太贵）
+        card = self.meta.get("seq_cardinality")
+        if card:
+            return [int(c) for c in card]
         return [int(self.cate.max()) + 1, int(self.brand.max()) + 1, int(self.btag.max()) + 1]
 
     def __len__(self) -> int:
