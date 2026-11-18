@@ -1,0 +1,10 @@
+[prep] rows=2,600,000 seq_len=1190 windows=24 out_len=1200
+[prep] users=1,002,421 index built 3.2s
+[prep] 50,000/2,600,000 4s
+[prep] 550,000/2,600,000 11s
+[prep] 1,050,000/2,600,000 18s
+[prep] 1,550,000/2,600,000 25s
+[prep] 2,050,000/2,600,000 32s
+[prep] 2,550,000/2,600,000 39s
+[prep] self-check OK (3 samples)
+[prep] done 2,600,000 rows in 133s → /tmp/taobao/prep1190

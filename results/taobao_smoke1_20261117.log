@@ -1,0 +1,73 @@
+[data] taobao rows=21,929,911 steps/epoch=342654 ns_card=[1141730, 97, 13, 3, 7, 4, 4, 2, 5, 846812, 12961, 423437, 255875, 461498, 2, 2, 439] seq_card=[12977, 461527, 5] ctr=0.0515
+[mode] explicit_bf16=0 weight_shadow=0
+[env] {'device_type': 'npu', 'torch': '2.7.1+cpu', 'torch_npu': '2.7.1.post4', 'soc': 'Ascend950DT_9582'} dist=world_size=1 rank=0 local_rank=0
+[shape] d=64 heads=4 ffn=256 blocks=3 (multi=1) seq=50 ns=4 sep=True total=55
+[shape] pyramid_schedule=[55, 4]
+[shape] params=776,982 (0.78 M)
+[run] amp=True input_dtype=torch.float32 dtype=bf16 mask=paper_causal attn_mask_env=bool weight_shadow=False per_card_micro_batch=64 grad_accum=1 per_card_batch=64 global_batch=64 ckpt_act=False
+/opt/buildtools/torch_v2_pt2.7.1/lib/python3.11/site-packages/torch/autograd/function.py:575: UserWarning: Cannot create tensor with interal format while allow_internel_format=False, tensor will be created with base format. (Triggered internally at ../torch_npu/csrc/aten/common/TensorFactories.cpp:340.)
+  return super().apply(*args, **kwargs)  # type: ignore[misc]
+Traceback (most recent call last):
+  File "/tmp/o16/OneTrans_NPU/scripts/run_onetrans_s.py", line 374, in <module>
+    main()
+  File "/tmp/o16/OneTrans_NPU/scripts/run_onetrans_s.py", line 308, in main
+    logits = model(non_seq[lo:hi], seq[lo:hi],
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/buildtools/torch_v2_pt2.7.1/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/buildtools/torch_v2_pt2.7.1/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/o16/OneTrans_NPU/models/taac_onetrans.py", line 203, in forward
+    seq_tokens = self.seq_tokenizer(seq_x)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/buildtools/torch_v2_pt2.7.1/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/buildtools/torch_v2_pt2.7.1/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/o16/OneTrans_NPU/paper_input.py", line 102, in forward
+    emb = self.tables(ids.reshape(-1, f))            # [B*L, F, e_dim]
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/buildtools/torch_v2_pt2.7.1/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/buildtools/torch_v2_pt2.7.1/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/o16/OneTrans_NPU/ns_backend.py", line 187, in forward
+    out = self.mod(ids.reshape(-1), offsets)      # 优化器已在反向内完成
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/buildtools/torch_v2_pt2.7.1/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/buildtools/torch_v2_pt2.7.1/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/buildtools/torch_v2_pt2.7.1/lib/python3.11/site-packages/dynamic_emb/distributed/batched_dynamicemb_table.py", line 901, in forward
+    res = DynamicEmbeddingFunctionV2.apply(
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/buildtools/torch_v2_pt2.7.1/lib/python3.11/site-packages/torch/autograd/function.py", line 575, in apply
+    return super().apply(*args, **kwargs)  # type: ignore[misc]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/buildtools/torch_v2_pt2.7.1/lib/python3.11/site-packages/dynamic_emb/distributed/batched_dynamicemb_function.py", line 375, in forward
+    ) = segmented_unique_op(indices, indices_table_range)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: Cannot access data pointer of Tensor that doesn't have storage
+Exception raised from throw_data_ptr_access_error at /pytorch/c10/core/TensorImpl.cpp:309 (most recent call first):
+frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0xd4 (0xffff7f843ea4 in /opt/buildtools/torch_v2_pt2.7.1/lib/python3.11/site-packages/torch/lib/libc10.so)
+frame #1: c10::detail::torchCheckFail(char const*, char const*, unsigned int, char const*) + 0x70 (0xffff7f7e3f1c in /opt/buildtools/torch_v2_pt2.7.1/lib/python3.11/site-packages/torch/lib/libc10.so)
+frame #2: c10::TensorImpl::throw_data_ptr_access_error() const + 0x40 (0xffff7f821580 in /opt/buildtools/torch_v2_pt2.7.1/lib/python3.11/site-packages/torch/lib/libc10.so)
+frame #3: <unknown function> + 0x3c950 (0xfffd247bc950 in /opt/buildtools/torch_v2_pt2.7.1/lib/python3.11/site-packages/dynamic_emb_extensions.cpython-311-aarch64-linux-gnu.so)
+frame #4: <unknown function> + 0x2a804 (0xfffd247aa804 in /opt/buildtools/torch_v2_pt2.7.1/lib/python3.11/site-packages/dynamic_emb_extensions.cpython-311-aarch64-linux-gnu.so)
+frame #5: <unknown function> + 0x2b260 (0xfffd247ab260 in /opt/buildtools/torch_v2_pt2.7.1/lib/python3.11/site-packages/dynamic_emb_extensions.cpython-311-aarch64-linux-gnu.so)
+frame #6: <unknown function> + 0x2b700 (0xfffd247ab700 in /opt/buildtools/torch_v2_pt2.7.1/lib/python3.11/site-packages/dynamic_emb_extensions.cpython-311-aarch64-linux-gnu.so)
+frame #7: <unknown function> + 0x2c448 (0xfffd247ac448 in /opt/buildtools/torch_v2_pt2.7.1/lib/python3.11/site-packages/dynamic_emb_extensions.cpython-311-aarch64-linux-gnu.so)
+frame #8: <unknown function> + 0x435c4 (0xfffd247c35c4 in /opt/buildtools/torch_v2_pt2.7.1/lib/python3.11/site-packages/dynamic_emb_extensions.cpython-311-aarch64-linux-gnu.so)
+frame #9: <unknown function> + 0x205fc (0xfffd247a05fc in /opt/buildtools/torch_v2_pt2.7.1/lib/python3.11/site-packages/dynamic_emb_extensions.cpython-311-aarch64-linux-gnu.so)
+<omitting python frames>
+frame #14: <unknown function> + 0x9e6610 (0xffff8a0f6610 in /opt/buildtools/torch_v2_pt2.7.1/lib/python3.11/site-packages/torch/lib/libtorch_python.so)
+
+[ERROR] 2026-11-17-19:33:58 (PID:2535142, Device:0, RankID:-1) ERR99999 UNKNOWN applicaiton exception

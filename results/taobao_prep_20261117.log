@@ -1,0 +1,6 @@
+[prep] rows=21,929,911  read 2s
+[prep] ns ok 5s
+[prep] seq_cate ok 92s
+[prep] seq_brand ok 180s
+[prep] seq_btag ok 257s
+[prep] done {"userid": 1141729, "cms_segid": 96, "cms_group_id": 12, "final_gender_code": 2, "age_level": 6, "pvalue_level": 3, "shopping_level": 3, "occupation": 1, "new_user_class_level": 4, "adgroup_id": 846811, "cate_id": 12960, "campaign_id": 423436, "customer": 255874, "brand": 461497, "pid": 1, "btag": 1} ctr=0.0515 258s
